@@ -6,6 +6,7 @@
   --late: #c2410c; --late-bg: #fff3ea;
   --done: #9ca3af; --danger: #dc2626;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 1px 1px rgba(0,0,0,.03);
+  --l1: #16a34a; --l2: #ca8a04; --l3: #ea580c; --l4: #dc2626;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -15,6 +16,7 @@
     --personal: #2dd4bf; --personal-bg: #12332f;
     --late: #fb923c; --late-bg: #33210f;
     --done: #6b7280; --danger: #f87171;
+    --l1: #4ade80; --l2: #facc15; --l3: #fb923c; --l4: #f87171;
   }
 }
 * { box-sizing: border-box; }
@@ -106,13 +108,16 @@ nav.bottom button.on { color: var(--accent); }
 .day { height: 46px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border-radius: 10px; font-size: 15px; }
 .day.out { opacity: .4; }
 .day.today span { color: var(--accent); font-weight: 800; }
-.day.sel { background: var(--accent); color: #fff; }
-.day.sel span { color: #fff; }
+.day.l1 { background: color-mix(in srgb, var(--l1) 16%, transparent); }
+.day.l2 { background: color-mix(in srgb, var(--l2) 22%, transparent); }
+.day.l3 { background: color-mix(in srgb, var(--l3) 26%, transparent); }
+.day.l4 { background: color-mix(in srgb, var(--l4) 30%, transparent); }
+.day.sel { box-shadow: inset 0 0 0 2px var(--accent); font-weight: 700; }
 .dots { display: flex; gap: 3px; height: 6px; }
 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--work); }
 .dot.personal { background: var(--personal); }
 .dot.task { background: var(--muted); }
-.day.sel .dot { background: #fff; }
+.cal .legend { justify-content: center; margin: 8px 0 2px; }
 .agenda-title { margin: 18px 0 8px; font-size: 16px; }
 
 /* bottom sheet */
@@ -149,3 +154,49 @@ nav.bottom button.on { color: var(--accent); }
 .set-block { padding: 12px 0; border-top: 1px solid var(--line); }
 .set-block h3 { margin: 0 0 6px; font-size: 15px; }
 .set-block .btns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+/* ngarkesa */
+.l0 { --lv: var(--muted); } .l1 { --lv: var(--l1); } .l2 { --lv: var(--l2); } .l3 { --lv: var(--l3); } .l4 { --lv: var(--l4); }
+.load { background: var(--card); border-radius: 14px; padding: 12px 14px; box-shadow: var(--shadow); margin: 10px 0; }
+.load-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.load-top b { color: var(--lv); }
+.num { font-variant-numeric: tabular-nums; font-weight: 700; }
+.bar { height: 8px; border-radius: 6px; background: var(--line); overflow: hidden; margin: 8px 0 4px; }
+.bar i { display: block; height: 100%; background: var(--lv); border-radius: 6px; }
+.load-sub { font-size: 13px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; background: var(--lv); margin-right: 4px; vertical-align: -1px; }
+
+/* kolona e orës, takimet në listë */
+.tcol { flex: none; width: 44px; display: flex; flex-direction: column; font-variant-numeric: tabular-nums; font-size: 14px; line-height: 1.25; }
+.tcol small { color: var(--muted); font-size: 12px; }
+.appt { border-left: 0; }
+.appt-ic { flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; font-size: 14px; background: var(--work-bg); margin-top: -1px; }
+.appt.personal .appt-ic { background: var(--personal-bg); }
+.appt .ttl { font-weight: 600; }
+.noest { font-style: italic; }
+.strong { color: var(--text); font-weight: 600; }
+
+/* java */
+.wday { background: var(--card); border-radius: 14px; box-shadow: var(--shadow); margin: 8px 0; overflow: hidden; }
+.wday > summary { display: flex; align-items: center; gap: 12px; padding: 12px 14px; list-style: none; cursor: pointer; }
+.wday > summary::-webkit-details-marker { display: none; }
+.wday.is-today { box-shadow: inset 0 0 0 2px var(--accent), var(--shadow); }
+.wday.is-today .wd-name b { color: var(--accent); }
+.wday.is-past > summary { opacity: .7; }
+.wd-name { width: 40px; display: flex; flex-direction: column; }
+.wd-name small { color: var(--muted); font-size: 12px; }
+.wd-bar { flex: 1; min-width: 0; }
+.wd-bar .bar { margin: 0 0 4px; }
+.wd-bar small { font-size: 12px; color: var(--muted); }
+.wd-tot { width: 78px; text-align: right; font-weight: 700; color: var(--lv); display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
+.wd-tot small { font-size: 11px; font-weight: 600; }
+.wday .list { border-radius: 0; box-shadow: none; border-top: 1px solid var(--line); }
+.add-day { display: block; width: 100%; padding: 10px; border-top: 1px solid var(--line); color: var(--accent); font-weight: 600; font-size: 14px; }
+.pad { padding: 12px 14px; margin: 0; border-top: 1px solid var(--line); }
+
+/* forma: ora + minutat */
+.row3 { display: grid; grid-template-columns: 1fr 1fr 0.8fr; gap: 8px; margin-top: 10px; }
+.row3 .fld { margin: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
+.chip-btn { padding: 5px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); font-size: 13px; font-weight: 600; }

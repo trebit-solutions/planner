@@ -1,5 +1,5 @@
 // Service worker: e bën aplikacionin të punojë offline dhe shfaq njoftimet.
-const CACHE = 'planner-v1';
+const CACHE = 'planner-v2';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 

@@ -1,17 +1,19 @@
 'use strict';
 /*
- * Planner — prototip PWA (v0.1)
+ * Planner — prototip PWA (v0.2)
  * Të dhënat ruhen vetëm në këtë pajisje (localStorage). Sinkronizimi vjen më vonë.
  *
  * Modeli:
  *  task: { id, title, space:'work'|'personal', date:'YYYY-MM-DD', scope:'day'|'week'|'month',
- *          rec:null|{type:'daily'|'weekly'|'days'|'monthly', days?:[0-6]}, remind:'HH:MM'|'',
- *          notes, done, doneAt,                       // detyrat e thjeshta
+ *          start:'HH:MM'|'', minutes:number, remind:min|null (para fillimit),
+ *          rec:null|{type:'daily'|'weekly'|'days'|'monthly', days?:[0-6]}, notes,
+ *          done, doneAt,                              // detyrat e thjeshta
  *          doneThrough, lastDoneOn, history[], undo } // detyrat e përsëritura
- *  appt: { id, title, space, date, time:'HH:MM'|'', duration, location, rec, remind:min|null, notes }
+ *  appt: { id, title, space, date, time:'HH:MM'|'', duration:min, location, rec, remind:min|null, notes }
  *
  * Bartja: detyra e pakryer me afat < sot del te "Sot" si "nga dje" / "e vonuar N ditë".
  * Detyra e përsëritur e humbur del NJË herë (jo kopje për çdo ditë të humbur).
+ * Ngarkesa e ditës = bashkimi i intervaleve me orë (takime + detyra) + minutat e detyrave pa orë.
  */
 
 const STORE_KEY = 'pp.v1';
@@ -20,8 +22,12 @@ const DAYS = ['Di', 'Hë', 'Ma', 'Më', 'En', 'Pr', 'Sh'];
 const DAYS_LONG = ['E diel', 'E hënë', 'E martë', 'E mërkurë', 'E enjte', 'E premte', 'E shtunë'];
 const MONTHS = ['Janar', 'Shkurt', 'Mars', 'Prill', 'Maj', 'Qershor', 'Korrik', 'Gusht', 'Shtator', 'Tetor', 'Nëntor', 'Dhjetor'];
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // java nis të hënën
-const REMIND_OPTS = [['', 'Pa kujtesë'], ['0', 'Në kohën e takimit'], ['15', '15 min para'], ['60', '1 orë para'], ['1440', '1 ditë para']];
+const REMIND_OPTS = [['', 'Pa kujtesë'], ['0', 'Kur fillon'], ['15', '15 min para'], ['60', '1 orë para'], ['1440', '1 ditë para']];
 const REC_OPTS = [['', 'Nuk përsëritet'], ['daily', 'Çdo ditë'], ['weekly', 'Çdo javë'], ['days', 'Ditë të caktuara'], ['monthly', 'Çdo muaj']];
+const LEVELS = [
+  { k: 'l0', name: 'E lirë' }, { k: 'l1', name: 'E lehtë' }, { k: 'l2', name: 'Mesatare' },
+  { k: 'l3', name: 'E plotë' }, { k: 'l4', name: 'E mbingarkuar' },
+];
 
 // ---------- data helpers ----------
 const pad = n => String(n).padStart(2, '0');
@@ -31,23 +37,44 @@ const addDays = (s, n) => { const d = parse(s); d.setDate(d.getDate() + n); retu
 const diffDays = (a, b) => Math.round((parse(a) - parse(b)) / 864e5); // a - b
 const today = () => fmt(new Date());
 const nowHM = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const toMin = hm => { const [h, m] = hm.split(':').map(Number); return h * 60 + m; };
+const addMinutes = (hm, m) => { const t = ((toMin(hm) + m) % 1440 + 1440) % 1440; return `${pad(Math.floor(t / 60))}:${pad(t % 60)}`; };
+const fmtDur = m => { m = Math.round(m || 0); if (!m) return '0'; const h = Math.floor(m / 60), r = m % 60; return h ? `${h}h${r ? ` ${r}m` : ''}` : `${r} min`; };
 const startOfWeek = s => { const d = parse(s); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return fmt(d); };
 const endOfWeek = s => addDays(startOfWeek(s), 6);
 const startOfMonth = s => s.slice(0, 8) + '01';
 const endOfMonth = s => { const d = parse(s); return fmt(new Date(d.getFullYear(), d.getMonth() + 1, 0)); };
 const fmtShort = s => { const d = parse(s); return `${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)}`; };
 const fmtLong = s => { const d = parse(s); return `${DAYS_LONG[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]}`; };
-const addMinutes = (hm, m) => { const [h, mi] = hm.split(':').map(Number); const t = (h * 60 + mi + m) % 1440; return `${pad(Math.floor(t / 60))}:${pad(t % 60)}`; };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const $ = (s, r = document) => r.querySelector(s);
 
 // ---------- state ----------
-function blank() { return { tasks: [], appts: [], notified: {}, ui: { space: 'all', view: 'today', quickSpace: 'work', lastSpace: 'work' } }; }
+function blank() {
+  return {
+    tasks: [], appts: [], notified: {},
+    settings: { capWeekday: 8, capWeekend: 3 },
+    ui: { space: 'all', view: 'today', quickSpace: 'work', lastSpace: 'work' },
+  };
+}
+function migrate(s) {
+  for (const t of s.tasks) {
+    // v0.1: remind ishte ora 'HH:MM' → bëhet ora e fillimit, me kujtesë "kur fillon"
+    if (typeof t.remind === 'string') { if (t.remind) { t.start = t.start || t.remind; t.remind = 0; } else t.remind = null; }
+    if (t.remind === undefined) t.remind = null;
+    if (t.start === undefined) t.start = '';
+    if (t.minutes === undefined) t.minutes = 0;
+  }
+  return s;
+}
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && Array.isArray(s.tasks) && Array.isArray(s.appts)) return { ...blank(), ...s, ui: { ...blank().ui, ...s.ui } };
+    if (s && Array.isArray(s.tasks) && Array.isArray(s.appts)) {
+      const b = blank();
+      return migrate({ ...b, ...s, settings: { ...b.settings, ...s.settings }, ui: { ...b.ui, ...s.ui } });
+    }
   } catch (e) { /* bosh */ }
   return blank();
 }
@@ -56,8 +83,8 @@ function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { alert('Ruajtja dështoi: ' + e.message); }
 }
-const ui = { cal: null, sel: null };       // gjendja e kalendarit (nuk ruhet)
-let sheetCtx = null;                       // çka është hapur te sheet-i
+const ui = { cal: null, sel: null, week: null }; // gjendja e pamjeve (nuk ruhet)
+let sheetCtx = null;
 const inSpace = x => state.ui.space === 'all' || x.space === state.ui.space;
 
 // ---------- recurrence ----------
@@ -81,7 +108,6 @@ function nextOcc(rec, start, from, limit = 400) {
   for (let i = 0; i < limit; i++, d = addDays(d, 1)) if (occursOn(rec, start, d)) return d;
   return null;
 }
-// Ndodhja më e hershme e pakryer deri sot (null nëse s'ka).
 function pendingOcc(t, T) {
   let from = t.doneThrough ? addDays(t.doneThrough, 1) : t.date;
   const min = addDays(T, -366);
@@ -98,7 +124,6 @@ function recLabel(r) {
 const lateLabel = n => n === 1 ? 'nga dje' : `e vonuar ${n} ditë`;
 const remindLabel = m => (REMIND_OPTS.find(o => o[0] === String(m)) || [, ''])[1];
 
-// Gjendja e llogaritur e një detyre për ditën T.
 function taskInfo(t, T) {
   if (t.rec) {
     const p = pendingOcc(t, T);
@@ -108,13 +133,74 @@ function taskInfo(t, T) {
   const due = t.scope === 'week' ? endOfWeek(t.date) : t.scope === 'month' ? endOfMonth(t.date) : t.date;
   return { due, late: t.done ? 0 : Math.max(0, diffDays(T, due)), done: !!t.done, doneToday: !!t.done && t.doneAt === T };
 }
-const apptsOn = d => state.appts.filter(inSpace).filter(a => occursOn(a.rec, a.date, d))
-  .sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+const apptsOn = d => state.appts.filter(inSpace).filter(a => occursOn(a.rec, a.date, d));
+
+// ---------- plani i ditës & ngarkesa ----------
+// Çdo gjë që zë kohë në ditën d: takime + detyra (me ose pa orë).
+function dayItems(d) {
+  const T = today(), out = [];
+  for (const a of apptsOn(d)) out.push({ kind: 'appt', it: a, d, start: a.time || '', min: a.time ? (a.duration || 0) : 0, done: false, late: 0 });
+  for (const t of state.tasks.filter(inSpace)) {
+    if (t.scope && t.scope !== 'day') continue;
+    const base = { kind: 'task', it: t, d, start: t.start || '', min: t.minutes || 0 };
+    if (d === T) {
+      const i = taskInfo(t, T);
+      if (i.doneToday) out.push({ ...base, info: i, done: true, late: 0, occ: t.rec ? (t.history || []).at(-1) : '' });
+      else if (!i.done && i.due && (i.late > 0 || i.due === T)) out.push({ ...base, info: i, done: false, late: i.late, occ: i.due });
+    } else if (t.rec) {
+      if (!occursOn(t.rec, t.date, d)) continue;
+      const done = (t.history || []).includes(d) || (!!t.doneThrough && d <= t.doneThrough);
+      out.push({ ...base, info: { due: d, late: 0 }, done, late: 0, occ: d, readOnly: true });
+    } else if (t.date === d) {
+      out.push({ ...base, info: taskInfo(t, T), done: !!t.done, late: 0, occ: d });
+    }
+  }
+  return out;
+}
+const sortItems = items => items.slice().sort((a, b) =>
+  (a.start ? 0 : 1) - (b.start ? 0 : 1) || (a.start || '').localeCompare(b.start || '') || (a.kind === 'appt' ? -1 : 1));
+
+function dayLoad(items) {
+  const iv = []; let untimed = 0, sum = 0, noEst = 0;
+  for (const e of items) {
+    if (e.kind === 'task' && !e.min) { noEst++; continue; }
+    if (e.start && e.min) { const s = toMin(e.start); iv.push([s, s + e.min]); sum += e.min; }
+    else untimed += e.min;
+  }
+  iv.sort((a, b) => a[0] - b[0]);
+  let busy = 0, cs = 0, ce = -1;
+  for (const [s, e] of iv) {
+    if (s >= ce) { if (ce > cs) busy += ce - cs; cs = s; ce = e; }
+    else ce = Math.max(ce, e);
+  }
+  if (ce > cs) busy += ce - cs;
+  return { total: busy + untimed, overlap: busy < sum, noEst, count: items.length };
+}
+const capacity = d => { const wd = parse(d).getDay(); return Math.round(((wd === 0 || wd === 6) ? state.settings.capWeekend : state.settings.capWeekday) * 60); };
+function level(load, cap) {
+  if (!load) return 0;
+  const r = cap ? load / cap : Infinity;
+  return r <= 0.5 ? 1 : r <= 0.8 ? 2 : r <= 1 ? 3 : 4;
+}
+function loadCard(d, items, title) {
+  const L = dayLoad(items), cap = capacity(d), lv = level(L.total, cap);
+  const pct = cap ? Math.min(100, L.total / cap * 100) : (L.total ? 100 : 0);
+  const sub = [
+    L.count ? `${L.count} gjëra` : 'Asgjë e planifikuar',
+    L.noEst ? `${L.noEst} pa kohë të caktuar` : '',
+    L.overlap ? '⚠ orë që mbivendosen' : '',
+    L.total > cap ? `+${fmtDur(L.total - cap)} mbi kapacitet` : '',
+  ].filter(Boolean).join(' · ');
+  return `<div class="load ${LEVELS[lv].k}"><div class="load-top"><span>${title}: <b>${LEVELS[lv].name}</b></span>
+    <span class="num">${fmtDur(L.total)} / ${fmtDur(cap)}</span></div>
+    <div class="bar"><i style="width:${pct}%"></i></div><div class="load-sub">${sub}</div></div>`;
+}
 
 // ---------- rendering ----------
 const tag = sp => state.ui.space === 'all' ? `<span class="tag ${sp}">${SPACE[sp]}</span>` : '';
 const section = (title, items, cls = '') => items.length
   ? `<section class="${cls}"><h2>${title} <span class="count">${items.length}</span></h2><ul class="list">${items.join('')}</ul></section>` : '';
+const timeCol = (start, min) => `<div class="tcol">${start ? `<b>${start}</b><small>${min ? addMinutes(start, min) : ''}</small>` : ''}</div>`;
 
 function taskItem(t, i, o = {}) {
   const done = o.done ?? i.done ?? false;
@@ -122,48 +208,60 @@ function taskItem(t, i, o = {}) {
   if (i.late > 0) {
     meta.push(`<span class="late-l">${lateLabel(i.late)}</span>`);
     meta.push(`<span>afati: ${fmtShort(i.due)}</span>`);
-  } else if (o.showDue && i.due) meta.push(`<span>${t.scope === 'week' ? 'deri ' : t.scope === 'month' ? 'deri ' : ''}${fmtShort(i.due)}</span>`);
+  } else if (o.showDue && i.due) meta.push(`<span>${t.scope === 'day' || !t.scope ? '' : 'deri '}${fmtShort(i.due)}</span>`);
   if (!o.showDue && t.scope === 'week') meta.push('<span>këtë javë</span>');
   if (!o.showDue && t.scope === 'month') meta.push('<span>këtë muaj</span>');
+  if (o.timeCol && !t.start) o = { ...o, timeCol: false, hintEst: true };
+  if (!o.timeCol && t.start) meta.push(`<span class="strong">🕘 ${t.start}${t.minutes ? '–' + addMinutes(t.start, t.minutes) : ''}</span>`);
+  if (t.minutes) meta.push(`<span>⏱ ${fmtDur(t.minutes)}</span>`);
+  else if ((o.timeCol || o.hintEst) && !done) meta.push('<span class="noest">pa kohë</span>');
   if (t.rec) meta.push(`<span>↻ ${recLabel(t.rec)}</span>`);
-  if (t.remind) meta.push(`<span>🔔 ${t.remind}</span>`);
+  if (t.start && t.remind != null) meta.push(`<span>🔔 ${remindLabel(t.remind)}</span>`);
   if (t.notes) meta.push('<span>📝</span>');
-  const left = o.readOnly
+  const left = o.readOnly && !done
     ? `<span class="rec-mark">↻</span>`
     : `<button class="check" data-act="toggle" aria-label="${done ? 'Shëno si të pakryer' : 'Shëno si të kryer'}">${done ? '✓' : ''}</button>`;
   return `<li class="item task ${t.space} ${done ? 'done' : ''} ${i.late > 0 ? 'is-late' : ''}" data-act="edit" data-id="${t.id}" data-occ="${o.occ || i.due || ''}">
-    ${left}
-    <div class="body"><div class="ttl">${esc(t.title)}</div>${meta.join('') ? `<div class="meta">${meta.join('')}</div>` : ''}</div></li>`;
+    ${o.timeCol ? timeCol(t.start, t.minutes) : ''}${left}
+    <div class="body"><div class="ttl">${esc(t.title)}</div><div class="meta">${meta.join('')}</div></div></li>`;
 }
 
-function apptItem(a, d) {
+function apptItem(a, d, o = {}) {
   const meta = [tag(a.space)];
+  if (o.showDue) meta.push(`<span>${fmtShort(d)}</span>`);
+  if (a.time && a.duration) meta.push(`<span>⏱ ${fmtDur(a.duration)}</span>`);
   if (a.location) meta.push(`<span>📍 ${esc(a.location)}</span>`);
   if (a.rec) meta.push(`<span>↻ ${recLabel(a.rec)}</span>`);
-  if (a.remind != null) meta.push(`<span>🔔 ${remindLabel(a.remind)}</span>`);
+  if (a.remind != null && a.time) meta.push(`<span>🔔 ${remindLabel(a.remind)}</span>`);
   const end = a.time && a.duration ? addMinutes(a.time, a.duration) : '';
   const past = d < today() || (d === today() && a.time && (end || a.time) < nowHM());
+  const tc = a.time ? timeCol(a.time, a.duration) : '<div class="tcol"><b>Gjithë</b><small>ditën</small></div>';
   return `<li class="item appt ${a.space} ${past ? 'past' : ''}" data-act="edit-appt" data-id="${a.id}">
-    <div class="time"><b>${a.time || 'Gjithë'}</b><small>${a.time ? end : 'ditën'}</small></div>
-    <div class="body"><div class="ttl">${esc(a.title)}</div>${meta.join('') ? `<div class="meta">${meta.join('')}</div>` : ''}</div></li>`;
+    ${tc}<span class="appt-ic" title="Takim">📅</span>
+    <div class="body"><div class="ttl">${esc(a.title)}</div><div class="meta">${meta.join('')}</div></div></li>`;
+}
+
+function entryRow(e) {
+  if (e.kind === 'appt') return apptItem(e.it, e.d);
+  return taskItem(e.it, e.info || { due: e.occ, late: e.late }, { done: e.done, occ: e.occ, readOnly: e.readOnly, timeCol: true });
 }
 
 function renderToday() {
   const T = today();
-  const late = [], now = [], week = [], month = [], done = [];
+  const items = dayItems(T);
+  const late = items.filter(e => e.late > 0 && !e.done).sort((a, b) => b.late - a.late);
+  const plan = sortItems(items.filter(e => !e.done && !(e.late > 0)));
+  const done = items.filter(e => e.done);
+  const week = [], month = [];
   for (const t of state.tasks.filter(inSpace)) {
+    if (t.scope !== 'week' && t.scope !== 'month') continue;
     const i = taskInfo(t, T);
-    if (i.doneToday) { done.push([t, i]); continue; }
-    if (i.done) continue;
-    if (i.late > 0) { late.push([t, i]); continue; }
-    if (t.rec) { if (i.due === T) now.push([t, i]); continue; }
-    if (t.scope === 'week') { if (startOfWeek(t.date) <= T) week.push([t, i]); }
-    else if (t.scope === 'month') { if (startOfMonth(t.date) <= T) month.push([t, i]); }
-    else if (t.date === T) now.push([t, i]);
+    if (i.done || i.late > 0) continue;
+    if (t.scope === 'week' && startOfWeek(t.date) <= T) week.push(taskItem(t, i, { showDue: true }));
+    if (t.scope === 'month' && startOfMonth(t.date) <= T) month.push(taskItem(t, i, { showDue: true }));
   }
-  late.sort((a, b) => b[1].late - a[1].late);
-  now.sort((a, b) => (a[0].remind || '99').localeCompare(b[0].remind || '99'));
-  const appts = apptsOn(T);
+  const lateWeekMonth = state.tasks.filter(inSpace).filter(t => (t.scope === 'week' || t.scope === 'month'))
+    .map(t => [t, taskInfo(t, T)]).filter(([, i]) => !i.done && i.late > 0).map(([t, i]) => taskItem(t, i));
 
   const qs = state.ui.space !== 'all' ? state.ui.space : state.ui.quickSpace;
   const quick = `<form class="quick" data-form="quick">
@@ -173,49 +271,80 @@ function renderToday() {
     </form>`;
 
   const body = [
-    section('Takimet sot', appts.map(a => apptItem(a, T))),
-    section('Nga ditët e kaluara', late.map(([t, i]) => taskItem(t, i)), 'late'),
-    section('Sot', now.map(([t, i]) => taskItem(t, i))),
-    section('Këtë javë', week.map(([t, i]) => taskItem(t, i, { showDue: true }))),
-    section('Këtë muaj', month.map(([t, i]) => taskItem(t, i, { showDue: true }))),
-    section('Të kryera sot', done.map(([t, i]) => taskItem(t, i, { done: true, occ: t.rec ? (t.history || []).at(-1) : '' }))),
+    section('Nga ditët e kaluara', [...late.map(entryRow), ...lateWeekMonth], 'late'),
+    section('Plani i sotëm', plan.map(entryRow)),
+    section('Këtë javë', week),
+    section('Këtë muaj', month),
+    section('Të kryera sot', done.map(entryRow)),
   ].join('');
 
-  return `<p class="date">${fmtLong(T)}</p>${quick}${body ||
+  return `<p class="date">${fmtLong(T)}</p>${loadCard(T, items, 'Ngarkesa sot')}${quick}${body ||
     '<p class="empty">Asgjë për sot. 🎉<br>Shkruaj lart çka të bie ndër mend, ose shtyp +.</p>'}`;
 }
 
 function renderTasks() {
   const T = today(), tm = addDays(T, 1), ew = endOfWeek(T), em = endOfMonth(T);
-  const g = { late: [], today: [], tomorrow: [], week: [], month: [], later: [], done: [] };
+  const g = { late: [], today: [], tomorrow: [], week: [], month: [], later: [] }, done = [];
+  const put = (due, late, row, start) => {
+    const key = late > 0 ? 'late' : !due ? 'later' : due === T ? 'today' : due === tm ? 'tomorrow' : due <= ew ? 'week' : due <= em ? 'month' : 'later';
+    g[key].push({ due: due || '9', late, start: start || '99', row });
+  };
   for (const t of state.tasks.filter(inSpace)) {
     const i = taskInfo(t, T);
-    if (i.done) { g.done.push([t, i]); continue; }
-    if (i.late > 0) g.late.push([t, i]);
-    else if (!i.due) g.later.push([t, i]);
-    else if (i.due === T) g.today.push([t, i]);
-    else if (i.due === tm) g.tomorrow.push([t, i]);
-    else if (i.due <= ew) g.week.push([t, i]);
-    else if (i.due <= em) g.month.push([t, i]);
-    else g.later.push([t, i]);
+    if (i.done) { done.push([t, i]); continue; }
+    put(i.due, i.late, taskItem(t, i, { showDue: true }), t.start);
   }
-  const byDue = (a, b) => (a[1].due || '9').localeCompare(b[1].due || '9');
-  Object.values(g).forEach(l => l.sort(byDue));
-  g.late.sort((a, b) => b[1].late - a[1].late);
-  g.done.sort((a, b) => (b[0].doneAt || '').localeCompare(a[0].doneAt || ''));
-  const it = (l, o) => l.map(([t, i]) => taskItem(t, i, o));
-  const doneList = g.done.slice(0, 30);
+  for (const a of state.appts.filter(inSpace)) {
+    const d = nextOcc(a.rec, a.date, T);
+    if (d) put(d, 0, apptItem(a, d, { showDue: true }), a.time);
+  }
+  const rows = l => l.sort((a, b) => b.late - a.late || a.due.localeCompare(b.due) || a.start.localeCompare(b.start)).map(x => x.row);
+  done.sort((a, b) => (b[0].doneAt || '').localeCompare(a[0].doneAt || ''));
   const body = [
-    section('Të vonuara', it(g.late), 'late'),
-    section('Sot', it(g.today)),
-    section('Nesër', it(g.tomorrow)),
-    section('Këtë javë', it(g.week, { showDue: true })),
-    section('Këtë muaj', it(g.month, { showDue: true })),
-    section('Më vonë', it(g.later, { showDue: true })),
-    doneList.length ? `<details><summary><h2>Të kryera <span class="count">${g.done.length}</span></h2></summary>
-      <ul class="list">${it(doneList).join('')}</ul></details>` : '',
+    section('Të vonuara', rows(g.late), 'late'),
+    section('Sot', rows(g.today)),
+    section('Nesër', rows(g.tomorrow)),
+    section('Këtë javë', rows(g.week)),
+    section('Këtë muaj', rows(g.month)),
+    section('Më vonë', rows(g.later)),
+    done.length ? `<details><summary><h2>Të kryera <span class="count">${done.length}</span></h2></summary>
+      <ul class="list">${done.slice(0, 30).map(([t, i]) => taskItem(t, i)).join('')}</ul></details>` : '',
   ].join('');
   return body || '<p class="empty">Nuk ka detyra ende. Shtyp + për të shtuar.</p>';
+}
+
+function renderWeek() {
+  const T = today();
+  if (!ui.week) ui.week = startOfWeek(T);
+  const days = [...Array(7)].map((_, k) => addDays(ui.week, k));
+  let tot = 0, capT = 0, rows = '';
+  for (const d of days) {
+    const items = dayItems(d), L = dayLoad(items), cap = capacity(d), lv = level(L.total, cap);
+    tot += L.total; capT += cap;
+    const pct = cap ? Math.min(100, L.total / cap * 100) : (L.total ? 100 : 0);
+    const x = parse(d);
+    const nAppt = items.filter(e => e.kind === 'appt').length, nTask = items.length - nAppt;
+    const sub = [nAppt ? `${nAppt} takim${nAppt > 1 ? 'e' : ''}` : '', nTask ? `${nTask} detyr${nTask > 1 ? 'a' : 'ë'}` : '',
+      L.noEst ? `${L.noEst} pa kohë` : '', L.overlap ? '⚠ mbivendosje' : ''].filter(Boolean).join(' · ') || 'e lirë';
+    const list = items.length ? `<ul class="list">${sortItems(items).map(entryRow).join('')}</ul>` : '<p class="note pad">Asgjë e planifikuar.</p>';
+    rows += `<details class="wday ${d === T ? 'is-today' : ''} ${d < T ? 'is-past' : ''}" ${d === T ? 'open' : ''}>
+      <summary class="${LEVELS[lv].k}">
+        <div class="wd-name"><b>${DAYS[x.getDay()]}</b><small>${x.getDate()} ${MONTHS[x.getMonth()].slice(0, 3)}</small></div>
+        <div class="wd-bar"><div class="bar"><i style="width:${pct}%"></i></div><small>${sub}</small></div>
+        <div class="wd-tot">${L.total ? fmtDur(L.total) : '—'}<small>${LEVELS[lv].name}</small></div>
+      </summary>${list}
+      <button class="add-day" data-act="add-on" data-date="${d}">+ Shto për ${DAYS_LONG[x.getDay()].toLowerCase()}</button></details>`;
+  }
+  const wkTasks = state.tasks.filter(inSpace).filter(t => t.scope === 'week' && startOfWeek(t.date) === ui.week)
+    .map(t => taskItem(t, taskInfo(t, T)));
+  const lvT = level(tot, capT), pctT = capT ? Math.min(100, tot / capT * 100) : 0;
+  return `<div class="cal-head"><h2>${fmtShort(days[0])} – ${fmtShort(days[6])}</h2>
+      <div class="nav"><button class="today-btn" data-act="wk-today">Kjo javë</button>
+      <button data-act="wk-prev" aria-label="Java paraprake">‹</button><button data-act="wk-next" aria-label="Java tjetër">›</button></div></div>
+    <div class="load ${LEVELS[lvT].k}"><div class="load-top"><span>Java: <b>${LEVELS[lvT].name}</b></span><span class="num">${fmtDur(tot)} / ${fmtDur(capT)}</span></div>
+      <div class="bar"><i style="width:${pctT}%"></i></div>
+      <div class="legend">${LEVELS.slice(1).map(l => `<span class="${l.k}"><i></i>${l.name}</span>`).join('')}</div></div>
+    ${rows}${section('Detyra për këtë javë', wkTasks)}`;
 }
 
 function renderCalendar() {
@@ -223,46 +352,34 @@ function renderCalendar() {
   if (!ui.sel) ui.sel = T;
   if (!ui.cal) ui.cal = startOfMonth(ui.sel);
   const first = parse(ui.cal), m = first.getMonth();
-  const tasks = state.tasks.filter(inSpace);
-  const tasksOn = d => tasks.filter(t => t.rec
-    ? (d >= T && occursOn(t.rec, t.date, d))
-    : ((t.scope || 'day') === 'day' && t.date === d));
-
   let cells = '';
   const last = endOfWeek(endOfMonth(ui.cal));
   for (let d = startOfWeek(ui.cal); d <= last; d = addDays(d, 1)) {
-    const x = parse(d), ap = apptsOn(d), tk = tasksOn(d);
-    const spaces = [...new Set(ap.map(a => a.space))];
-    cells += `<button class="day ${x.getMonth() !== m ? 'out' : ''} ${d === T ? 'today' : ''} ${d === ui.sel ? 'sel' : ''}" data-act="cal-day" data-date="${d}">
-      <span>${x.getDate()}</span><i class="dots">${spaces.map(s => `<b class="dot ${s}"></b>`).join('')}${tk.length ? '<b class="dot task"></b>' : ''}</i></button>`;
+    const x = parse(d), items = dayItems(d), lv = level(dayLoad(items).total, capacity(d));
+    const spaces = [...new Set(items.filter(e => e.kind === 'appt').map(e => e.it.space))];
+    const hasTask = items.some(e => e.kind === 'task');
+    cells += `<button class="day ${LEVELS[lv].k} ${x.getMonth() !== m ? 'out' : ''} ${d === T ? 'today' : ''} ${d === ui.sel ? 'sel' : ''}" data-act="cal-day" data-date="${d}">
+      <span>${x.getDate()}</span><i class="dots">${spaces.map(s => `<b class="dot ${s}"></b>`).join('')}${hasTask ? '<b class="dot task"></b>' : ''}</i></button>`;
   }
-
-  const sel = ui.sel;
-  const ap = apptsOn(sel).map(a => apptItem(a, sel));
-  const tk = tasksOn(sel).map(t => {
-    if (t.rec) {
-      const isDone = !!t.doneThrough && sel <= t.doneThrough;
-      const pending = pendingOcc(t, T) || nextOcc(t.rec, t.date, T);
-      return taskItem(t, { due: sel, late: 0 }, { done: isDone, occ: sel, readOnly: !isDone && sel !== pending });
-    }
-    return taskItem(t, taskInfo(t, T));
-  });
-
+  const sel = ui.sel, items = dayItems(sel);
   return `<div class="cal-head"><h2>${MONTHS[m]} ${first.getFullYear()}</h2>
       <div class="nav"><button class="today-btn" data-act="cal-today">Sot</button>
       <button data-act="cal-prev" aria-label="Muaji paraprak">‹</button><button data-act="cal-next" aria-label="Muaji tjetër">›</button></div></div>
-    <div class="cal"><div class="wk">${WEEK_ORDER.map(i => `<span>${DAYS[i]}</span>`).join('')}</div><div class="grid">${cells}</div></div>
+    <div class="cal"><div class="wk">${WEEK_ORDER.map(i => `<span>${DAYS[i]}</span>`).join('')}</div><div class="grid">${cells}</div>
+      <div class="legend">${LEVELS.slice(1).map(l => `<span class="${l.k}"><i></i>${l.name}</span>`).join('')}</div></div>
     <h3 class="agenda-title">${fmtLong(sel)}</h3>
-    ${section('Takimet', ap)}${section('Detyrat', tk)}
-    ${!ap.length && !tk.length ? '<p class="empty">Asgjë për këtë ditë.<br>Shtyp + për të shtuar një takim.</p>' : ''}`;
+    ${loadCard(sel, items, 'Ngarkesa')}
+    ${section('Plani', sortItems(items).map(entryRow))}
+    ${!items.length ? '<p class="empty">Asgjë për këtë ditë.<br>Shtyp + për të shtuar.</p>' : ''}`;
 }
 
+const TITLES = { today: 'Sot', tasks: 'Detyrat', week: 'Java', calendar: 'Kalendari' };
 function render() {
   document.querySelectorAll('.spaces button').forEach(b => b.classList.toggle('on', b.dataset.space === state.ui.space));
   document.querySelectorAll('nav.bottom button').forEach(b => b.classList.toggle('on', b.dataset.view === state.ui.view));
-  const v = state.ui.view;
-  $('#title').textContent = { today: 'Sot', tasks: 'Detyrat', calendar: 'Kalendari' }[v];
-  $('#view').innerHTML = v === 'tasks' ? renderTasks() : v === 'calendar' ? renderCalendar() : renderToday();
+  const v = TITLES[state.ui.view] ? state.ui.view : 'today';
+  $('#title').textContent = TITLES[v];
+  $('#view').innerHTML = { today: renderToday, tasks: renderTasks, week: renderWeek, calendar: renderCalendar }[v]();
 }
 
 // ---------- actions ----------
@@ -273,12 +390,12 @@ function toggleTask(id, occ) {
   if (t.rec) {
     occ = occ || pendingOcc(t, T) || T;
     if (t.doneThrough && occ <= t.doneThrough) {
-      if (!t.undo) return; // vetëm hapi i fundit mund të kthehet
+      if (!t.undo) return;
       t.doneThrough = t.undo.doneThrough; t.lastDoneOn = t.undo.lastDoneOn; t.undo = null;
       (t.history || []).pop();
     } else {
       t.undo = { doneThrough: t.doneThrough || null, lastDoneOn: t.lastDoneOn || null };
-      t.doneThrough = occ > T ? occ : T; // kryen edhe ditët e humbura → s'ka dyfishime
+      t.doneThrough = occ > T ? occ : T;
       t.lastDoneOn = T;
       (t.history ||= []).push(occ);
     }
@@ -293,7 +410,8 @@ function quickAdd(form) {
   const input = form.elements.q, title = input.value.trim();
   if (!title) return;
   const space = state.ui.space !== 'all' ? state.ui.space : state.ui.quickSpace;
-  state.tasks.push({ id: uid(), created: Date.now(), title, space, date: today(), scope: 'day', rec: null, remind: '', notes: '', done: false });
+  state.tasks.push({ id: uid(), created: Date.now(), title, space, date: today(), scope: 'day', rec: null,
+    start: '', minutes: 0, remind: null, notes: '', done: false });
   save(); render();
   $('#quickInput')?.focus();
 }
@@ -308,6 +426,15 @@ const recFields = (rec, date) => {
     <div class="days ${rec?.type === 'days' ? '' : 'hidden'}">${WEEK_ORDER.map(i =>
       `<label><input type="checkbox" name="days" value="${i}" ${days.includes(i) ? 'checked' : ''}><span>${DAYS[i]}</span></label>`).join('')}</div>`;
 };
+const timeFields = (start, minutes, startLabel) => {
+  const end = start && minutes ? addMinutes(start, minutes) : '';
+  return `<div class="row3">
+      <label class="fld"><span>${startLabel}</span><input type="time" name="start" value="${esc(start)}"></label>
+      <label class="fld"><span>Mbaron</span><input type="time" name="end" value="${end}"></label>
+      <label class="fld"><span>Minuta</span><input type="number" name="minutes" min="0" max="1440" step="1" inputmode="numeric" value="${minutes || ''}" placeholder="p.sh. 40"></label>
+    </div>
+    <div class="chips">${[15, 30, 45, 60, 90, 120, 180].map(m => `<button type="button" class="chip-btn" data-act="set-min" data-min="${m}">${fmtDur(m)}</button>`).join('')}</div>`;
+};
 
 function taskFields(t, sp, def) {
   const T = today();
@@ -316,15 +443,16 @@ function taskFields(t, sp, def) {
     if (t.scope === 'week') when = 'week';
     else if (t.scope === 'month') when = 'month';
     else { when = t.date === T ? 'today' : t.date === addDays(T, 1) ? 'tomorrow' : 'date'; date = t.date; }
-  } else if (def.date && def.date !== T) when = 'date';
+  } else if (def.date && def.date !== T) when = def.date === addDays(T, 1) ? 'tomorrow' : 'date';
   return `<input class="title-in" name="title" placeholder="Çka duhet bërë?" value="${esc(t?.title)}" required autocomplete="off">
     ${spaceSeg(sp)}
     <div class="row2">
       <label class="fld"><span>Afati</span><select name="when">${opt([['today', 'Sot'], ['tomorrow', 'Nesër'], ['week', 'Këtë javë'], ['month', 'Këtë muaj'], ['date', 'Datë tjetër…']], when)}</select></label>
       <label class="fld ${when === 'date' ? '' : 'hidden'}" data-datewrap><span>Data</span><input type="date" name="date" value="${date}"></label>
     </div>
+    <div data-timewrap>${timeFields(t?.start || '', t?.minutes || '', 'Fillon (ops.)')}</div>
     ${recFields(t?.rec, date)}
-    <label class="fld"><span>Më kujto në orën (opsionale)</span><input type="time" name="remind" value="${esc(t?.remind)}"></label>
+    <label class="fld" data-remindwrap><span>Kujtesa (kërkon orën e fillimit)</span><select name="remind">${opt(REMIND_OPTS, t ? (t.remind ?? '') : '')}</select></label>
     <label class="fld"><span>Shënim</span><textarea name="notes" placeholder="Detaje…">${esc(t?.notes)}</textarea></label>`;
 }
 
@@ -333,15 +461,13 @@ function apptFields(a, sp, def) {
   const date = a?.date || def.date || today();
   return `<input class="title-in" name="title" placeholder="Takim me…" value="${esc(a?.title)}" required autocomplete="off">
     ${spaceSeg(sp)}
+    <label class="fld"><span>Data</span><input type="date" name="date" value="${date}" required></label>
+    ${timeFields(a ? a.time : next, a ? a.duration : 60, 'Fillon')}
+    <p class="note" style="margin:-4px 0 6px">Ora bosh = gjithë ditën (nuk llogaritet te ngarkesa).</p>
     <div class="row2">
-      <label class="fld"><span>Data</span><input type="date" name="date" value="${date}" required></label>
-      <label class="fld"><span>Ora (bosh = gjithë ditën)</span><input type="time" name="time" value="${a ? esc(a.time) : next}"></label>
-    </div>
-    <div class="row2" style="margin-top:10px">
-      <label class="fld"><span>Kohëzgjatja</span><select name="duration">${opt([['15', '15 min'], ['30', '30 min'], ['45', '45 min'], ['60', '1 orë'], ['90', '1.5 orë'], ['120', '2 orë'], ['180', '3 orë']], a?.duration ?? 60)}</select></label>
       <label class="fld"><span>Kujtesa</span><select name="remind">${opt(REMIND_OPTS, a ? (a.remind ?? '') : '15')}</select></label>
+      <label class="fld"><span>Vendi</span><input name="location" value="${esc(a?.location)}" placeholder="Zyra, online…"></label>
     </div>
-    <label class="fld"><span>Vendi</span><input name="location" value="${esc(a?.location)}" placeholder="Zyra, online, adresa…"></label>
     ${recFields(a?.rec, date)}
     <label class="fld"><span>Shënim</span><textarea name="notes" placeholder="Detaje…">${esc(a?.notes)}</textarea></label>`;
 }
@@ -373,6 +499,18 @@ function syncForm(form) {
   const isPeriod = when === 'week' || when === 'month';
   form.querySelector('[data-recwrap]').classList.toggle('hidden', isPeriod);
   form.querySelector('.days').classList.toggle('hidden', isPeriod || form.elements.rec.value !== 'days');
+  form.querySelector('[data-remindwrap]')?.classList.toggle('hidden', isPeriod);
+}
+// Fillon + Minuta → Mbaron;  Fillon + Mbaron → Minuta
+function syncTimes(form, src) {
+  const s = form.elements.start.value, end = form.elements.end, min = form.elements.minutes;
+  if (src === 'end') {
+    if (s && end.value) { let d = toMin(end.value) - toMin(s); if (d <= 0) d += 1440; min.value = d; }
+  } else {
+    const m = parseInt(min.value, 10);
+    end.value = s && m > 0 ? addMinutes(s, m) : (s ? end.value : '');
+    if (src === 'start' && s && end.value && !(m > 0)) syncTimes(form, 'end');
+  }
 }
 
 function submitSheet(form) {
@@ -382,12 +520,17 @@ function submitSheet(form) {
   if (!title) return;
   const space = f.get('space') || 'work';
   const notes = (f.get('notes') || '').trim();
+  const start = f.get('start') || '';
+  let minutes = Math.max(0, parseInt(f.get('minutes'), 10) || 0);
+  if (!minutes && start && f.get('end')) { minutes = toMin(f.get('end')) - toMin(start); if (minutes <= 0) minutes += 1440; }
+  const r = f.get('remind');
+  const remind = r === '' || r == null ? null : Number(r);
   const readRec = date => {
     const type = f.get('rec');
     if (!type) return null;
-    const r = { type };
-    if (type === 'days') { r.days = f.getAll('days').map(Number); if (!r.days.length) r.days = [parse(date).getDay()]; }
-    return r;
+    const rr = { type };
+    if (type === 'days') { rr.days = f.getAll('days').map(Number); if (!rr.days.length) rr.days = [parse(date).getDay()]; }
+    return rr;
   };
 
   if (kind === 'task') {
@@ -401,19 +544,18 @@ function submitSheet(form) {
     const rec = scope === 'day' ? readRec(date) : null;
     const t = item || { id: uid(), created: Date.now(), done: false };
     if (item && JSON.stringify(item.rec) !== JSON.stringify(rec)) { t.doneThrough = null; t.undo = null; }
-    Object.assign(t, { title, space, date, scope, rec, remind: f.get('remind') || '', notes });
+    Object.assign(t, { title, space, date, scope, rec, start, minutes, remind: start && scope === 'day' ? remind : null, notes });
     if (rec) { t.done = false; t.doneAt = null; }
     if (!item) state.tasks.push(t);
+    Object.keys(state.notified).filter(k => k.startsWith(`t|${t.id}|`)).forEach(k => delete state.notified[k]);
   } else {
     const date = f.get('date') || T;
     const a = item || { id: uid(), created: Date.now() };
-    const r = f.get('remind');
     Object.assign(a, {
-      title, space, date, time: f.get('time') || '', duration: Number(f.get('duration')) || 60,
-      location: (f.get('location') || '').trim(), rec: readRec(date), remind: r === '' ? null : Number(r), notes,
+      title, space, date, time: start, duration: start ? (minutes || 60) : 0,
+      location: (f.get('location') || '').trim(), rec: readRec(date), remind, notes,
     });
     if (!item) state.appts.push(a);
-    // ndryshim i orës → lejo kujtesën përsëri
     Object.keys(state.notified).filter(k => k.startsWith(`a|${a.id}|`)).forEach(k => delete state.notified[k]);
   }
   state.ui.lastSpace = space;
@@ -433,8 +575,16 @@ function openSettings() {
   sheetCtx = { kind: 'settings' };
   const perm = 'Notification' in window ? Notification.permission : 'unsupported';
   const permText = { granted: '✅ Të lejuara', denied: '⛔ Të bllokuara (lejoji te cilësimet e Chrome)', default: 'Ende jo të lejuara', unsupported: 'Ky shfletues nuk i mbështet' }[perm];
+  const s = state.settings;
   $('#panel').innerHTML = `
     <div class="sheet-head"><h2>Cilësimet</h2><button class="icon" data-act="close" aria-label="Mbyll">✕</button></div>
+    <div class="set-block"><h3>Kapaciteti ditor</h3>
+      <p class="note">Sa orë planifikon të jesh i zënë në ditë. Nga kjo llogariten ngjyrat e ngarkesës:
+      deri 50% e lehtë · deri 80% mesatare · deri 100% e plotë · mbi 100% e mbingarkuar.</p>
+      <div class="row2">
+        <label class="fld"><span>Hënë – Premte (orë)</span><input type="number" min="0" max="24" step="0.5" data-setting="capWeekday" value="${s.capWeekday}"></label>
+        <label class="fld"><span>Shtunë – Diel (orë)</span><input type="number" min="0" max="24" step="0.5" data-setting="capWeekend" value="${s.capWeekend}"></label>
+      </div></div>
     <div class="set-block"><h3>Njoftimet</h3><p class="note">${permText}</p>
       ${perm === 'default' ? '<div class="btns"><button class="btn" data-act="notif">Lejo njoftimet</button></div>' : ''}
       ${perm === 'granted' ? '<div class="btns"><button class="btn" data-act="notif-test">Provo një njoftim</button></div>' : ''}
@@ -445,12 +595,12 @@ function openSettings() {
       <div class="btns"><button class="btn" data-act="export">Eksporto (.json)</button>
       <button class="btn" data-act="import">Importo</button></div>
       <input type="file" id="importFile" accept="application/json,.json" hidden></div>
-    <div class="set-block"><p class="note">Planner v0.1 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
+    <div class="set-block"><p class="note">Planner v0.2 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
   $('#sheet').classList.remove('hidden');
 }
 
 function exportData() {
-  const blob = new Blob([JSON.stringify({ app: 'planner', version: 1, exported: new Date().toISOString(), tasks: state.tasks, appts: state.appts }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ app: 'planner', version: 2, exported: new Date().toISOString(), tasks: state.tasks, appts: state.appts, settings: state.settings }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `planner-backup-${today()}.json`;
@@ -465,6 +615,8 @@ function importData(file) {
       if (!Array.isArray(d.tasks) || !Array.isArray(d.appts)) throw new Error('Skedar i pavlefshëm');
       if (!confirm(`Të zëvendësohen të dhënat aktuale me ${d.tasks.length} detyra dhe ${d.appts.length} takime?`)) return;
       state.tasks = d.tasks; state.appts = d.appts; state.notified = {};
+      if (d.settings) state.settings = { ...state.settings, ...d.settings };
+      migrate(state);
       save(); closeSheet(); render();
     } catch (e) { alert('Importi dështoi: ' + e.message); }
   };
@@ -479,30 +631,31 @@ async function notify(title, body) {
     else new Notification(title, { body, icon: 'icons/icon-192.png' });
   } catch (e) { console.warn('Njoftimi dështoi', e); }
 }
+function taskDueOn(t, d, T) {
+  if (t.scope && t.scope !== 'day') return false;
+  if (t.rec) return d === T ? pendingOcc(t, T) === T : (occursOn(t.rec, t.date, d) && !(t.doneThrough && d <= t.doneThrough));
+  return !t.done && t.date === d;
+}
 function checkReminders() {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const now = Date.now(), T = today(), WINDOW = 6 * 3600e3;
+  const now = Date.now(), T = today();
   const at = (d, hm) => { const x = parse(d); const [h, m] = hm.split(':').map(Number); x.setHours(h, m, 0, 0); return x.getTime(); };
   const fire = (key, title, body) => { if (state.notified[key]) return; state.notified[key] = T; save(); notify(title, body); };
-
-  for (const t of state.tasks) {
-    if (!t.remind) continue;
-    const i = taskInfo(t, T);
-    const dueToday = t.rec ? i.due === T && !i.doneToday : (!t.done && (t.scope || 'day') === 'day' && t.date === T);
-    if (!dueToday) continue;
-    const when = at(T, t.remind);
-    if (now >= when && now - when < WINDOW) fire(`t|${t.id}|${T}`, `☑ ${t.title}`, `${SPACE[t.space]} · detyrë për sot`);
-  }
-  for (const a of state.appts) {
-    if (a.remind == null || !a.time) continue;
-    for (const d of [T, addDays(T, 1)]) {
-      if (!occursOn(a.rec, a.date, d)) continue;
-      const start = at(d, a.time), when = start - a.remind * 60e3;
-      if (now >= when && now < start + 30 * 60e3)
-        fire(`a|${a.id}|${d}`, `📅 ${a.title}`, `${d === T ? 'Sot' : 'Nesër'} në ${a.time}${a.location ? ' · ' + a.location : ''}`);
+  const check = (key, d, startHM, remind, title, body) => {
+    const start = at(d, startHM), when = start - remind * 60e3;
+    if (now >= when && now < start + 30 * 60e3) fire(key, title, body);
+  };
+  for (const d of [T, addDays(T, 1)]) {
+    const label = d === T ? 'Sot' : 'Nesër';
+    for (const t of state.tasks) {
+      if (!t.start || t.remind == null || !taskDueOn(t, d, T)) continue;
+      check(`t|${t.id}|${d}`, d, t.start, t.remind, `☑ ${t.title}`, `${label} në ${t.start}${t.minutes ? ' · ' + fmtDur(t.minutes) : ''} · ${SPACE[t.space]}`);
+    }
+    for (const a of state.appts) {
+      if (a.remind == null || !a.time || !occursOn(a.rec, a.date, d)) continue;
+      check(`a|${a.id}|${d}`, d, a.time, a.remind, `📅 ${a.title}`, `${label} në ${a.time}${a.location ? ' · ' + a.location : ''}`);
     }
   }
-  // pastro shënimet e vjetra
   const old = addDays(T, -3);
   for (const k of Object.keys(state.notified)) if (state.notified[k] < old) delete state.notified[k];
 }
@@ -518,17 +671,24 @@ document.addEventListener('click', e => {
   const holder = el.closest('[data-id]');
   const id = holder?.dataset.id;
   switch (el.dataset.act) {
-    case 'toggle': e.stopPropagation(); toggleTask(id, holder?.dataset.occ); break;
+    case 'toggle': toggleTask(id, holder?.dataset.occ); break;
     case 'edit': openSheet('task', state.tasks.find(t => t.id === id)); break;
     case 'edit-appt': openSheet('appt', state.appts.find(a => a.id === id)); break;
     case 'add':
       if (state.ui.view === 'calendar') openSheet('appt', null, { date: ui.sel || today() });
       else openSheet('task');
       break;
+    case 'add-on': openSheet('task', null, { date: el.dataset.date }); break;
     case 'kind': {
       const title = $('#panel .title-in')?.value || '';
       openSheet(el.dataset.kind, null, sheetCtx?.def || {});
       $('#panel .title-in').value = title;
+      break;
+    }
+    case 'set-min': {
+      const form = el.closest('form');
+      form.elements.minutes.value = el.dataset.min;
+      syncTimes(form, 'minutes');
       break;
     }
     case 'delete': deleteItem(); break;
@@ -552,6 +712,9 @@ document.addEventListener('click', e => {
       ui.cal = fmt(d); render(); break;
     }
     case 'cal-today': ui.sel = today(); ui.cal = startOfMonth(ui.sel); render(); break;
+    case 'wk-prev': ui.week = addDays(ui.week, -7); render(); break;
+    case 'wk-next': ui.week = addDays(ui.week, 7); render(); break;
+    case 'wk-today': ui.week = startOfWeek(today()); render(); break;
   }
 });
 document.addEventListener('submit', e => {
@@ -561,8 +724,16 @@ document.addEventListener('submit', e => {
   if (f === 'quick') quickAdd(e.target);
   if (f === 'sheet') submitSheet(e.target);
 });
+document.addEventListener('input', e => {
+  const form = e.target.closest('form[data-form="sheet"]');
+  if (form && ['start', 'end', 'minutes'].includes(e.target.name)) syncTimes(form, e.target.name);
+});
 document.addEventListener('change', e => {
   if (e.target.id === 'importFile' && e.target.files[0]) importData(e.target.files[0]);
+  if (e.target.dataset.setting) {
+    state.settings[e.target.dataset.setting] = Math.max(0, Math.min(24, Number(e.target.value) || 0));
+    save(); render();
+  }
   const form = e.target.closest('form[data-form="sheet"]');
   if (form && ['when', 'rec'].includes(e.target.name)) syncForm(form);
 });
@@ -570,7 +741,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && sheetCtx) 
 
 let lastDay = today();
 function tick() {
-  if (today() !== lastDay) { lastDay = today(); ui.sel = null; ui.cal = null; if (!sheetCtx) render(); }
+  if (today() !== lastDay) { lastDay = today(); ui.sel = null; ui.cal = null; ui.week = null; if (!sheetCtx) render(); }
   checkReminders();
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { tick(); if (!sheetCtx) render(); } });

@@ -36,6 +36,16 @@ INSTALIMI NË ANDROID
   - Kalendari mujor me pika për takimet/detyrat
   - Backup: eksport/import JSON (Cilësimet ⚙)
 
+ÇKA U SHTUA NË v0.2
+  - Detyrat kanë orë fillimi (opsionale) dhe kohëzgjatje në minuta (çfarëdo numri);
+    "Fillon + Minuta" llogarit "Mbaron", dhe "Mbaron" llogarit minutat
+  - Takimet dalin bashkë me detyrat në planin e ditës, të renditura sipas orës
+  - Ngarkesa e ditës me ngjyra: e lehtë (≤50%) · mesatare (≤80%) · e plotë (≤100%) · e mbingarkuar
+    Llogaritet nga kapaciteti ditor (⚙: Hë–Pr 8h, Sh–Di 3h si parazgjedhje).
+    Oraret që mbivendosen numërohen një herë dhe shënohen me ⚠.
+  - Faqja "Java": ngarkesa e secilës ditë + totali i javës; prek ditën për planin
+  - Kalendari: ditët me ngjyrë sipas ngarkesës
+
 KUFIZIMET E v0.1
   - Të dhënat ruhen vetëm në pajisje (pa sinkronizim telefon ↔ kompjuter)
   - Kujtesat dalin vetëm kur app-i është i hapur ose ka qenë i hapur së fundmi;
