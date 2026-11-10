@@ -1,6 +1,6 @@
 'use strict';
 /*
- * Planner — prototip PWA (v0.2)
+ * Planner — prototip PWA (v0.3)
  * Të dhënat ruhen vetëm në këtë pajisje (localStorage). Sinkronizimi vjen më vonë.
  *
  * Modeli:
@@ -54,7 +54,7 @@ const $ = (s, r = document) => r.querySelector(s);
 function blank() {
   return {
     tasks: [], appts: [], notified: {},
-    settings: { capWeekday: 8, capWeekend: 3 },
+    settings: { capWeekday: 8, capWeekend: 3, dayStart: '08:00', dayEnd: '17:00' },
     ui: { space: 'all', view: 'today', quickSpace: 'work', lastSpace: 'work' },
   };
 }
@@ -137,16 +137,20 @@ const apptsOn = d => state.appts.filter(inSpace).filter(a => occursOn(a.rec, a.d
 
 // ---------- plani i ditës & ngarkesa ----------
 // Çdo gjë që zë kohë në ditën d: takime + detyra (me ose pa orë).
-function dayItems(d) {
-  const T = today(), out = [];
-  for (const a of apptsOn(d)) out.push({ kind: 'appt', it: a, d, start: a.time || '', min: a.time ? (a.duration || 0) : 0, done: false, late: 0 });
-  for (const t of state.tasks.filter(inSpace)) {
+// all=true → pa filtrin Punë/Personale (koha është e njëjta për të dyja)
+function dayItems(d, all = false) {
+  const T = today(), out = [], ok = x => all || inSpace(x);
+  for (const a of state.appts.filter(ok)) {
+    if (occursOn(a.rec, a.date, d)) out.push({ kind: 'appt', it: a, d, start: a.time || '', min: a.time ? (a.duration || 0) : 0, done: false, late: 0 });
+  }
+  for (const t of state.tasks.filter(ok)) {
     if (t.scope && t.scope !== 'day') continue;
     const base = { kind: 'task', it: t, d, start: t.start || '', min: t.minutes || 0 };
     if (d === T) {
       const i = taskInfo(t, T);
       if (i.doneToday) out.push({ ...base, info: i, done: true, late: 0, occ: t.rec ? (t.history || []).at(-1) : '' });
-      else if (!i.done && i.due && (i.late > 0 || i.due === T)) out.push({ ...base, info: i, done: false, late: i.late, occ: i.due });
+      // e vonuara humb orën e vjetër: s'rezervon slot sot, numërohet si kohë pa orë
+      else if (!i.done && i.due && (i.late > 0 || i.due === T)) out.push({ ...base, start: i.late > 0 ? '' : base.start, info: i, done: false, late: i.late, occ: i.due });
     } else if (t.rec) {
       if (!occursOn(t.rec, t.date, d)) continue;
       const done = (t.history || []).includes(d) || (!!t.doneThrough && d <= t.doneThrough);
@@ -176,6 +180,37 @@ function dayLoad(items) {
   if (ce > cs) busy += ce - cs;
   return { total: busy + untimed, overlap: busy < sum, noEst, count: items.length };
 }
+// ---------- rezervimi i orëve ----------
+const hm = m => `${pad(Math.floor(m / 60) % 24)}:${pad(m % 60)}`;
+// Intervalet e zëna (të gjitha hapësirat, pa të kryerat), pa elementin që po ndryshohet (ex).
+function busyIntervals(d, ex) {
+  return dayItems(d, true)
+    .filter(e => e.start && e.min && !e.done && !(ex && e.kind === ex.kind && e.it.id === ex.id))
+    .map(e => ({ s: toMin(e.start), e: Math.min(1440, toMin(e.start) + e.min), it: e.it, kind: e.kind }));
+}
+function conflictsAt(d, start, min, ex) {
+  const s = toMin(start), e = s + min;
+  return busyIntervals(d, ex).filter(b => s < b.e && b.s < e);
+}
+// Hapësirat e lira brenda orarit të ditës (sot: nga tani e tutje).
+function freeSlots(d, ex) {
+  let from = toMin(state.settings.dayStart || '08:00');
+  const to = toMin(state.settings.dayEnd || '17:00');
+  if (d === today()) from = Math.max(from, Math.ceil(toMin(nowHM()) / 5) * 5);
+  const out = []; let cur = from;
+  for (const b of busyIntervals(d, ex).sort((a, b) => a.s - b.s)) {
+    if (cur >= to) break;
+    if (b.s > cur) out.push([cur, Math.min(b.s, to)]);
+    cur = Math.max(cur, b.e);
+  }
+  if (cur < to) out.push([cur, to]);
+  return out.filter(([a, b]) => b - a >= 5);
+}
+function findSlot(d, min, ex, after = 0) {
+  for (const [s, e] of freeSlots(d, ex)) { const st = Math.max(s, after); if (e - st >= min) return st; }
+  return null;
+}
+
 const capacity = d => { const wd = parse(d).getDay(); return Math.round(((wd === 0 || wd === 6) ? state.settings.capWeekend : state.settings.capWeekday) * 60); };
 function level(load, cap) {
   if (!load) return 0;
@@ -198,8 +233,21 @@ function loadCard(d, items, title) {
 
 // ---------- rendering ----------
 const tag = sp => state.ui.space === 'all' ? `<span class="tag ${sp}">${SPACE[sp]}</span>` : '';
-const section = (title, items, cls = '') => items.length
-  ? `<section class="${cls}"><h2>${title} <span class="count">${items.length}</span></h2><ul class="list">${items.join('')}</ul></section>` : '';
+const section = (title, items, cls = '', count = items.length) => items.length
+  ? `<section class="${cls}"><h2>${title} <span class="count">${count}</span></h2><ul class="list">${items.join('')}</ul></section>` : '';
+
+// Plani i ditës me hapësirat e lira ndërmjet (prek "E lirë" për të rezervuar).
+function planRows(entries, d) {
+  if (d < today()) return entries.map(entryRow);
+  const rows = entries.map(e => ({ t: e.start ? toMin(e.start) : 9999, g: 0, html: entryRow(e) }));
+  for (const [a, b] of freeSlots(d)) {
+    if (b - a < 15) continue;
+    rows.push({ t: a, g: 1, html: `<li class="item gap" data-act="add-at" data-date="${d}" data-start="${hm(a)}">
+      <div class="tcol"><b>${hm(a)}</b><small>${hm(b)}</small></div>
+      <div class="body"><span class="gap-l">E lirë · ${fmtDur(b - a)}</span><span class="gap-add">+ Rezervo</span></div></li>` });
+  }
+  return rows.sort((x, y) => x.t - y.t || x.g - y.g).map(r => r.html);
+}
 const timeCol = (start, min) => `<div class="tcol">${start ? `<b>${start}</b><small>${min ? addMinutes(start, min) : ''}</small>` : ''}</div>`;
 
 function taskItem(t, i, o = {}) {
@@ -266,13 +314,13 @@ function renderToday() {
   const qs = state.ui.space !== 'all' ? state.ui.space : state.ui.quickSpace;
   const quick = `<form class="quick" data-form="quick">
       ${state.ui.space === 'all' ? `<button type="button" class="chip ${qs}" data-act="quick-space" title="Ndrysho hapësirën">${SPACE[qs]}</button>` : ''}
-      <input id="quickInput" name="q" placeholder="Çka të bie ndër mend? Shto për sot…" autocomplete="off" enterkeyhint="done">
+      <input id="quickInput" name="q" placeholder="p.sh. Thirr Arbenin 30m @10" autocomplete="off" enterkeyhint="done">
       <button class="add" type="submit">Shto</button>
     </form>`;
 
   const body = [
     section('Nga ditët e kaluara', [...late.map(entryRow), ...lateWeekMonth], 'late'),
-    section('Plani i sotëm', plan.map(entryRow)),
+    section('Plani i sotëm', planRows(plan, T), '', plan.length),
     section('Këtë javë', week),
     section('Këtë muaj', month),
     section('Të kryera sot', done.map(entryRow)),
@@ -326,7 +374,8 @@ function renderWeek() {
     const nAppt = items.filter(e => e.kind === 'appt').length, nTask = items.length - nAppt;
     const sub = [nAppt ? `${nAppt} takim${nAppt > 1 ? 'e' : ''}` : '', nTask ? `${nTask} detyr${nTask > 1 ? 'a' : 'ë'}` : '',
       L.noEst ? `${L.noEst} pa kohë` : '', L.overlap ? '⚠ mbivendosje' : ''].filter(Boolean).join(' · ') || 'e lirë';
-    const list = items.length ? `<ul class="list">${sortItems(items).map(entryRow).join('')}</ul>` : '<p class="note pad">Asgjë e planifikuar.</p>';
+    const rowsHtml = planRows(sortItems(items), d);
+    const list = rowsHtml.length ? `<ul class="list">${rowsHtml.join('')}</ul>` : '<p class="note pad">Asgjë e planifikuar.</p>';
     rows += `<details class="wday ${d === T ? 'is-today' : ''} ${d < T ? 'is-past' : ''}" ${d === T ? 'open' : ''}>
       <summary class="${LEVELS[lv].k}">
         <div class="wd-name"><b>${DAYS[x.getDay()]}</b><small>${x.getDate()} ${MONTHS[x.getMonth()].slice(0, 3)}</small></div>
@@ -369,7 +418,7 @@ function renderCalendar() {
       <div class="legend">${LEVELS.slice(1).map(l => `<span class="${l.k}"><i></i>${l.name}</span>`).join('')}</div></div>
     <h3 class="agenda-title">${fmtLong(sel)}</h3>
     ${loadCard(sel, items, 'Ngarkesa')}
-    ${section('Plani', sortItems(items).map(entryRow))}
+    ${section('Plani', planRows(sortItems(items), sel), '', items.length)}
     ${!items.length ? '<p class="empty">Asgjë për këtë ditë.<br>Shtyp + për të shtuar.</p>' : ''}`;
 }
 
@@ -406,14 +455,47 @@ function toggleTask(id, occ) {
   save(); render();
 }
 
+// "Thirr Arbenin 30m @10"  → titulli + 30 minuta + ora 10:00
+// Kohëzgjatja: 30m, 30 min, 45', 1h, 1.5h, 1h30, 2 orë · Ora: @10, @10:30, ora 10, në 14:15
+function parseQuick(text) {
+  let title = ` ${text} `, start = '', minutes = 0;
+  title = title.replace(/\s(?:@|ora\s+|n[eë]\s+)(\d{1,2})(?:[:.](\d{2}))?(?=\s)/i, (m, h, mm) => {
+    if (+h > 23 || (mm && +mm > 59)) return m;
+    start = `${pad(+h)}:${mm || '00'}`; return ' ';
+  });
+  title = title.replace(/\s(\d+(?:[.,]\d+)?)\s*(?:h|or[eë])(?:\s*(\d{1,2})\s*(?:m|min)?)?(?=\s)/i, (m, a, b) => {
+    minutes = Math.round(parseFloat(a.replace(',', '.')) * 60) + (b ? +b : 0); return ' ';
+  });
+  if (!minutes) title = title.replace(/\s(\d{1,3})\s*(?:m|min|minuta|')(?=\s)/i, (m, a) => { minutes = +a; return ' '; });
+  return { title: title.replace(/\s+/g, ' ').trim(), start, minutes };
+}
+
 function quickAdd(form) {
-  const input = form.elements.q, title = input.value.trim();
+  const input = form.elements.q, raw = input.value.trim();
+  if (!raw) return;
+  const { title, start, minutes } = parseQuick(raw);
   if (!title) return;
+  const T = today();
   const space = state.ui.space !== 'all' ? state.ui.space : state.ui.quickSpace;
-  state.tasks.push({ id: uid(), created: Date.now(), title, space, date: today(), scope: 'day', rec: null,
-    start: '', minutes: 0, remind: null, notes: '', done: false });
+  if (start && minutes && conflictsAt(T, start, minutes).length) {
+    // ora e zënë → hap formën që të zgjedhësh orë tjetër
+    input.value = '';
+    openSheet('task', null, { space, prefill: { title, start, minutes } });
+    return;
+  }
+  state.tasks.push({ id: uid(), created: Date.now(), title, space, date: T, scope: 'day', rec: null,
+    start, minutes, remind: start ? 0 : null, notes: '', done: false });
   save(); render();
+  toast(`U shtua: ${title}${start ? ` · ${start}${minutes ? '–' + addMinutes(start, minutes) : ''}` : minutes ? ` · ${fmtDur(minutes)}` : ''}`);
   $('#quickInput')?.focus();
+}
+
+let toastTimer;
+function toast(msg) {
+  let el = $('#toast');
+  if (!el) { el = document.createElement('div'); el.id = 'toast'; document.body.appendChild(el); }
+  el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
 }
 
 // ---------- bottom sheet (shto / ndrysho) ----------
@@ -428,13 +510,52 @@ const recFields = (rec, date) => {
 };
 const timeFields = (start, minutes, startLabel) => {
   const end = start && minutes ? addMinutes(start, minutes) : '';
-  return `<div class="row3">
+  return `<div class="fld"><span>Sa kohë merr?</span>
+      <div class="dur"><input type="number" name="minutes" min="0" max="1440" step="1" inputmode="numeric" value="${minutes || ''}" placeholder="0"><em>minuta</em></div></div>
+    <div class="chips">${[15, 30, 45, 60, 90, 120, 180].map(m => `<button type="button" class="chip-btn" data-act="set-min" data-min="${m}">${fmtDur(m)}</button>`).join('')}</div>
+    <div class="row2" data-startrow>
       <label class="fld"><span>${startLabel}</span><input type="time" name="start" value="${esc(start)}"></label>
       <label class="fld"><span>Mbaron</span><input type="time" name="end" value="${end}"></label>
-      <label class="fld"><span>Minuta</span><input type="number" name="minutes" min="0" max="1440" step="1" inputmode="numeric" value="${minutes || ''}" placeholder="p.sh. 40"></label>
     </div>
-    <div class="chips">${[15, 30, 45, 60, 90, 120, 180].map(m => `<button type="button" class="chip-btn" data-act="set-min" data-min="${m}">${fmtDur(m)}</button>`).join('')}</div>`;
+    <div class="slot" data-slotinfo></div>`;
 };
+// Data për të cilën po planifikohet forma (null për "këtë javë/muaj").
+function formDate(form) {
+  const T = today(), w = form.elements.when?.value;
+  if (!w) return form.elements.date.value || null;
+  return w === 'today' ? T : w === 'tomorrow' ? addDays(T, 1) : w === 'date' ? (form.elements.date.value || null) : null;
+}
+// Kontroll i drejtpërdrejtë: a është ora e lirë + orët e lira të ditës.
+function updateSlot(form) {
+  const box = form?.querySelector('[data-slotinfo]');
+  if (!box) return false;
+  const d = formDate(form);
+  const ex = sheetCtx?.item ? { kind: sheetCtx.kind, id: sheetCtx.item.id } : null;
+  const start = form.elements.start.value, min = parseInt(form.elements.minutes.value, 10) || 0;
+  box.classList.remove('flash');
+  if (!d) { box.innerHTML = ''; return false; }
+  let html = '', conflict = false;
+  if (start && min > 0) {
+    const c = conflictsAt(d, start, min, ex);
+    if (c.length) {
+      conflict = true;
+      const sug = findSlot(d, min, ex, toMin(start)) ?? findSlot(d, min, ex);
+      html = `<div class="slot-bad">⛔ ${start}–${addMinutes(start, min)} është e zënë nga: ${c.map(b =>
+        `<b>${esc(b.it.title)}</b> (${hm(b.s)}–${hm(b.e)})`).join(', ')}</div>` +
+        (sug != null ? `<button type="button" class="chip-btn ok" data-act="use-slot" data-start="${hm(sug)}">Vendose në ${hm(sug)}–${hm(sug + min)}</button>`
+          : '<p class="note">S\'ka hapësirë të lirë aq të gjatë këtë ditë brenda orarit.</p>');
+    } else html = `<div class="slot-ok">✓ ${start}–${addMinutes(start, min)} është e lirë dhe do të rezervohet.</div>`;
+  } else if (min > 0) {
+    const s = findSlot(d, min, ex);
+    if (s != null) html = `<button type="button" class="chip-btn ok" data-act="use-slot" data-start="${hm(s)}">Rezervo orën e parë të lirë: ${hm(s)}–${hm(s + min)}</button>`;
+  }
+  const free = freeSlots(d, ex).filter(([a, b]) => b - a >= 15).slice(0, 8);
+  html += `<div class="free"><span>Orët e lira ${d === today() ? 'sot' : fmtShort(d)}:</span>${free.length
+    ? free.map(([a, b]) => `<button type="button" class="free-chip" data-act="use-slot" data-start="${hm(a)}">${hm(a)}–${hm(b)}</button>`).join('')
+    : ' <em>asnjë brenda orarit</em>'}</div>`;
+  box.innerHTML = html;
+  return conflict;
+}
 
 function taskFields(t, sp, def) {
   const T = today();
@@ -444,13 +565,14 @@ function taskFields(t, sp, def) {
     else if (t.scope === 'month') when = 'month';
     else { when = t.date === T ? 'today' : t.date === addDays(T, 1) ? 'tomorrow' : 'date'; date = t.date; }
   } else if (def.date && def.date !== T) when = def.date === addDays(T, 1) ? 'tomorrow' : 'date';
-  return `<input class="title-in" name="title" placeholder="Çka duhet bërë?" value="${esc(t?.title)}" required autocomplete="off">
+  const p = t || def.prefill || {};
+  return `<input class="title-in" name="title" placeholder="Çka duhet bërë?" value="${esc(p.title)}" required autocomplete="off">
     ${spaceSeg(sp)}
     <div class="row2">
       <label class="fld"><span>Afati</span><select name="when">${opt([['today', 'Sot'], ['tomorrow', 'Nesër'], ['week', 'Këtë javë'], ['month', 'Këtë muaj'], ['date', 'Datë tjetër…']], when)}</select></label>
       <label class="fld ${when === 'date' ? '' : 'hidden'}" data-datewrap><span>Data</span><input type="date" name="date" value="${date}"></label>
     </div>
-    <div data-timewrap>${timeFields(t?.start || '', t?.minutes || '', 'Fillon (ops.)')}</div>
+    <div data-timewrap>${timeFields(p.start || '', p.minutes || '', 'Fillon në')}</div>
     ${recFields(t?.rec, date)}
     <label class="fld" data-remindwrap><span>Kujtesa (kërkon orën e fillimit)</span><select name="remind">${opt(REMIND_OPTS, t ? (t.remind ?? '') : '')}</select></label>
     <label class="fld"><span>Shënim</span><textarea name="notes" placeholder="Detaje…">${esc(t?.notes)}</textarea></label>`;
@@ -500,6 +622,8 @@ function syncForm(form) {
   form.querySelector('[data-recwrap]').classList.toggle('hidden', isPeriod);
   form.querySelector('.days').classList.toggle('hidden', isPeriod || form.elements.rec.value !== 'days');
   form.querySelector('[data-remindwrap]')?.classList.toggle('hidden', isPeriod);
+  form.querySelector('[data-startrow]')?.classList.toggle('hidden', isPeriod);
+  updateSlot(form);
 }
 // Fillon + Minuta → Mbaron;  Fillon + Mbaron → Minuta
 function syncTimes(form, src) {
@@ -525,6 +649,16 @@ function submitSheet(form) {
   if (!minutes && start && f.get('end')) { minutes = toMin(f.get('end')) - toMin(start); if (minutes <= 0) minutes += 1440; }
   const r = f.get('remind');
   const remind = r === '' || r == null ? null : Number(r);
+  // Slot i zënë → mos ruaj
+  if (start && minutes > 0 && formDate(form)) {
+    form.elements.minutes.value = minutes;
+    if (updateSlot(form)) {
+      const box = form.querySelector('[data-slotinfo]');
+      box.classList.add('flash');
+      box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+  }
   const readRec = date => {
     const type = f.get('rec');
     if (!type) return null;
@@ -544,7 +678,7 @@ function submitSheet(form) {
     const rec = scope === 'day' ? readRec(date) : null;
     const t = item || { id: uid(), created: Date.now(), done: false };
     if (item && JSON.stringify(item.rec) !== JSON.stringify(rec)) { t.doneThrough = null; t.undo = null; }
-    Object.assign(t, { title, space, date, scope, rec, start, minutes, remind: start && scope === 'day' ? remind : null, notes });
+    Object.assign(t, { title, space, date, scope, rec, start: scope === 'day' ? start : '', minutes, remind: start && scope === 'day' ? remind : null, notes });
     if (rec) { t.done = false; t.doneAt = null; }
     if (!item) state.tasks.push(t);
     Object.keys(state.notified).filter(k => k.startsWith(`t|${t.id}|`)).forEach(k => delete state.notified[k]);
@@ -578,6 +712,12 @@ function openSettings() {
   const s = state.settings;
   $('#panel').innerHTML = `
     <div class="sheet-head"><h2>Cilësimet</h2><button class="icon" data-act="close" aria-label="Mbyll">✕</button></div>
+    <div class="set-block"><h3>Orari i ditës</h3>
+      <p class="note">Brenda këtij orari aplikacioni të tregon orët e lira dhe të gjen slot për detyrat.</p>
+      <div class="row2">
+        <label class="fld"><span>Fillon</span><input type="time" data-setting="dayStart" value="${s.dayStart}"></label>
+        <label class="fld"><span>Mbaron</span><input type="time" data-setting="dayEnd" value="${s.dayEnd}"></label>
+      </div></div>
     <div class="set-block"><h3>Kapaciteti ditor</h3>
       <p class="note">Sa orë planifikon të jesh i zënë në ditë. Nga kjo llogariten ngjyrat e ngarkesës:
       deri 50% e lehtë · deri 80% mesatare · deri 100% e plotë · mbi 100% e mbingarkuar.</p>
@@ -595,7 +735,7 @@ function openSettings() {
       <div class="btns"><button class="btn" data-act="export">Eksporto (.json)</button>
       <button class="btn" data-act="import">Importo</button></div>
       <input type="file" id="importFile" accept="application/json,.json" hidden></div>
-    <div class="set-block"><p class="note">Planner v0.2 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
+    <div class="set-block"><p class="note">Planner v0.3 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
   $('#sheet').classList.remove('hidden');
 }
 
@@ -688,7 +828,18 @@ document.addEventListener('click', e => {
     case 'set-min': {
       const form = el.closest('form');
       form.elements.minutes.value = el.dataset.min;
-      syncTimes(form, 'minutes');
+      syncTimes(form, 'minutes'); updateSlot(form);
+      break;
+    }
+    case 'use-slot': {
+      const form = el.closest('form');
+      form.elements.start.value = el.dataset.start;
+      syncTimes(form, 'start'); updateSlot(form);
+      break;
+    }
+    case 'add-at': {
+      const max = el.querySelector('small')?.textContent;
+      openSheet('task', null, { date: el.dataset.date, prefill: { start: el.dataset.start, minutes: '' } });
       break;
     }
     case 'delete': deleteItem(); break;
@@ -726,16 +877,19 @@ document.addEventListener('submit', e => {
 });
 document.addEventListener('input', e => {
   const form = e.target.closest('form[data-form="sheet"]');
-  if (form && ['start', 'end', 'minutes'].includes(e.target.name)) syncTimes(form, e.target.name);
+  if (form && ['start', 'end', 'minutes'].includes(e.target.name)) { syncTimes(form, e.target.name); updateSlot(form); }
 });
 document.addEventListener('change', e => {
   if (e.target.id === 'importFile' && e.target.files[0]) importData(e.target.files[0]);
   if (e.target.dataset.setting) {
-    state.settings[e.target.dataset.setting] = Math.max(0, Math.min(24, Number(e.target.value) || 0));
+    const k = e.target.dataset.setting;
+    if (e.target.type === 'time') { if (e.target.value) state.settings[k] = e.target.value; }
+    else state.settings[k] = Math.max(0, Math.min(24, Number(e.target.value) || 0));
     save(); render();
   }
   const form = e.target.closest('form[data-form="sheet"]');
   if (form && ['when', 'rec'].includes(e.target.name)) syncForm(form);
+  if (form && e.target.name === 'date') updateSlot(form);
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && sheetCtx) closeSheet(); });
 

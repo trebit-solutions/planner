@@ -200,3 +200,33 @@ nav.bottom button.on { color: var(--accent); }
 .row3 .fld { margin: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
 .chip-btn { padding: 5px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); font-size: 13px; font-weight: 600; }
+.chip-btn.ok { background: var(--l1); border-color: var(--l1); color: #fff; margin: 6px 0 2px; padding: 8px 12px; }
+
+/* kohëzgjatja */
+.dur { display: flex; align-items: center; gap: 10px; }
+.dur input { width: 120px !important; font-size: 22px !important; font-weight: 700; text-align: center; }
+.dur em { font-style: normal; color: var(--muted); font-weight: 600; }
+
+/* rezervimi i orës */
+.slot { margin: 2px 0 8px; }
+.slot-ok { color: var(--l1); font-weight: 600; font-size: 14px; }
+.slot-bad { background: color-mix(in srgb, var(--l4) 14%, transparent); color: var(--l4); border-radius: 10px; padding: 8px 10px; font-size: 14px; font-weight: 600; }
+.slot-bad b { color: var(--text); }
+.slot.flash .slot-bad { animation: shake .35s; }
+@keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+.free { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; font-size: 13px; color: var(--muted); }
+.free > span { width: 100%; font-weight: 600; }
+.free-chip { padding: 5px 9px; border-radius: 8px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+  background: color-mix(in srgb, var(--l1) 14%, transparent); color: var(--l1); }
+
+/* hapësirë e lirë në plan */
+.item.gap { background: repeating-linear-gradient(135deg, transparent 0 8px, color-mix(in srgb, var(--l1) 6%, transparent) 8px 16px); padding-top: 8px; padding-bottom: 8px; }
+.item.gap .tcol b { font-weight: 500; color: var(--muted); }
+.item.gap .body { display: flex; justify-content: space-between; align-items: center; align-self: center; }
+.gap-l { color: var(--l1); font-weight: 600; font-size: 14px; }
+.gap-add { color: var(--accent); font-weight: 700; font-size: 13px; }
+
+#toast { position: fixed; left: 50%; bottom: calc(150px + env(safe-area-inset-bottom)); transform: translate(-50%, 20px); opacity: 0;
+  background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 12px; font-size: 14px; font-weight: 600;
+  max-width: calc(100% - 32px); z-index: 30; transition: .2s; pointer-events: none; }
+#toast.show { opacity: 1; transform: translate(-50%, 0); }

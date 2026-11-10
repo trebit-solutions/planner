@@ -1,5 +1,5 @@
-﻿# Server i vogÃ«l lokal pÃ«r ta provuar Planner-in nÃ« kompjuter.
-# PÃ«rdorimi:  powershell -ExecutionPolicy Bypass -File serve.ps1   â†’ hap http://localhost:8080
+﻿# Server i vogël lokal për ta provuar Planner-in në kompjuter.
+# Përdorimi:  powershell -ExecutionPolicy Bypass -File serve.ps1   → hap http://localhost:8080
 param([int]$Port = 8080)
 $root = $PSScriptRoot
 $types = @{ '.html'='text/html; charset=utf-8'; '.js'='text/javascript; charset=utf-8'; '.css'='text/css; charset=utf-8';
@@ -7,7 +7,7 @@ $types = @{ '.html'='text/html; charset=utf-8'; '.js'='text/javascript; charset=
 $listener = New-Object System.Net.HttpListener
 $listener.Prefixes.Add("http://localhost:$Port/")
 $listener.Start()
-Write-Host "Planner: http://localhost:$Port/  (Ctrl+C pÃ«r ta ndalur)"
+Write-Host "Planner: http://localhost:$Port/  (Ctrl+C për ta ndalur)"
 try {
   while ($listener.IsListening) {
     $ctx = $listener.GetContext()

@@ -46,6 +46,16 @@ INSTALIMI NË ANDROID
   - Faqja "Java": ngarkesa e secilës ditë + totali i javës; prek ditën për planin
   - Kalendari: ditët me ngjyrë sipas ngarkesës
 
+ÇKA U SHTUA NË v0.3
+  - Rezervimi i orëve: detyra/takimi me orë + minuta e zë atë slot.
+    Nuk ruhet diçka tjetër që bie mbi të (edhe mes Punë dhe Personale);
+    forma tregon kush e zë dhe propozon orën e parë të lirë.
+  - "Sa kohë merr?" del e para në formë, me butona të shpejtë
+  - Orët e lira të ditës në formë dhe në plan ("E lirë · 1h 30m  + Rezervo")
+  - Shkrim i shpejtë me kohë: "Thirr Arbenin 30m @10", "Raport 1h30 ora 14"
+  - Orari i ditës te ⚙ (parazgjedhje 08:00–17:00)
+  - Detyrat e vonuara nuk e mbajnë orën e vjetër (nuk bllokojnë slot sot)
+
 KUFIZIMET E v0.1
   - Të dhënat ruhen vetëm në pajisje (pa sinkronizim telefon ↔ kompjuter)
   - Kujtesat dalin vetëm kur app-i është i hapur ose ka qenë i hapur së fundmi;
