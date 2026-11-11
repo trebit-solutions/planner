@@ -731,35 +731,57 @@ function openSettings() {
       <p class="note">Në këtë prototip kujtesat dalin kur aplikacioni është i hapur ose ka qenë i hapur së fundmi.
       Njoftimet edhe kur app-i është plotësisht i mbyllur vijnë në fazën 2 (me server).</p></div>
     <div class="set-block"><h3>Backup</h3>
-      <p class="note">Të dhënat ruhen vetëm në këtë telefon. Bëj backup herë pas here.</p>
-      <div class="btns"><button class="btn" data-act="export">Eksporto (.json)</button>
-      <button class="btn" data-act="import">Importo</button></div>
-      <input type="file" id="importFile" accept="application/json,.json" hidden></div>
-    <div class="set-block"><p class="note">Planner v0.3 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
+      <p class="note">Të dhënat ruhen vetëm në këtë pajisje. Për t'i bartur telefon ↔ PC:</p>
+      <p class="note"><b>1.</b> Te pajisja që i ka të dhënat: <b>Dërgo</b> (p.sh. te WhatsApp / email te vetja) ose <b>Kopjo</b>.</p>
+      <div class="btns"><button class="btn" data-act="share">Dërgo të dhënat</button>
+      <button class="btn" data-act="copy">Kopjo</button></div>
+      <p class="note"><b>2.</b> Te pajisja tjetër: ngjite tekstin këtu, ose zgjidh skedarin .json.</p>
+      <textarea id="pasteData" rows="3" placeholder="Ngjit këtu tekstin e kopjuar…" style="width:100%;box-sizing:border-box;font:12px monospace"></textarea>
+      <div class="btns"><button class="btn" data-act="paste-import">Importo tekstin</button>
+      <button class="btn" data-act="import">Importo skedar</button>
+      <button class="btn" data-act="export">Shkarko .json</button></div>
+      <input type="file" id="importFile" accept="application/json,.json,text/plain" hidden></div>
+    <div class="set-block"><p class="note">Planner v0.3.1 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
   $('#sheet').classList.remove('hidden');
 }
 
+const backupJson = () => JSON.stringify({ app: 'planner', version: 2, exported: new Date().toISOString(), tasks: state.tasks, appts: state.appts, settings: state.settings });
+const backupName = () => `planner-backup-${today()}.json`;
 function exportData() {
-  const blob = new Blob([JSON.stringify({ app: 'planner', version: 2, exported: new Date().toISOString(), tasks: state.tasks, appts: state.appts, settings: state.settings }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([backupJson()], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `planner-backup-${today()}.json`;
+  a.download = backupName();
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+async function copyData() {
+  try { await navigator.clipboard.writeText(backupJson()); toast('U kopjua ✓ – ngjite te pajisja tjetër'); }
+  catch { const t = $('#pasteData'); t.value = backupJson(); t.select(); document.execCommand('copy'); toast('U kopjua ✓'); }
+}
+async function shareData() {
+  const json = backupJson();
+  try {
+    const file = new File([json], backupName(), { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) return await navigator.share({ files: [file], title: 'Planner backup' });
+    if (navigator.share) return await navigator.share({ title: 'Planner backup', text: json });
+  } catch (e) { if (e.name === 'AbortError') return; }
+  copyData();
+}
+function applyImport(text) {
+  try {
+    const d = JSON.parse(text.trim());
+    if (!Array.isArray(d.tasks) || !Array.isArray(d.appts)) throw new Error('Të dhëna të pavlefshme');
+    if (!confirm(`Të zëvendësohen të dhënat aktuale me ${d.tasks.length} detyra dhe ${d.appts.length} takime?`)) return;
+    state.tasks = d.tasks; state.appts = d.appts; state.notified = {};
+    if (d.settings) state.settings = { ...state.settings, ...d.settings };
+    migrate(state);
+    save(); closeSheet(); render(); toast('Të dhënat u importuan ✓');
+  } catch (e) { alert('Importi dështoi: ' + e.message); }
+}
 function importData(file) {
   const r = new FileReader();
-  r.onload = () => {
-    try {
-      const d = JSON.parse(r.result);
-      if (!Array.isArray(d.tasks) || !Array.isArray(d.appts)) throw new Error('Skedar i pavlefshëm');
-      if (!confirm(`Të zëvendësohen të dhënat aktuale me ${d.tasks.length} detyra dhe ${d.appts.length} takime?`)) return;
-      state.tasks = d.tasks; state.appts = d.appts; state.notified = {};
-      if (d.settings) state.settings = { ...state.settings, ...d.settings };
-      migrate(state);
-      save(); closeSheet(); render();
-    } catch (e) { alert('Importi dështoi: ' + e.message); }
-  };
+  r.onload = () => applyImport(r.result);
   r.readAsText(file);
 }
 
@@ -849,6 +871,14 @@ document.addEventListener('click', e => {
     case 'notif-test': notify('Planner', 'Njoftimet punojnë ✅'); break;
     case 'export': exportData(); break;
     case 'import': $('#importFile').click(); break;
+    case 'share': shareData(); break;
+    case 'copy': copyData(); break;
+    case 'paste-import': {
+      const v = $('#pasteData').value;
+      if (v.trim()) applyImport(v);
+      else navigator.clipboard?.readText().then(t => t.trim() ? applyImport(t) : toast('Ngjit fillimisht tekstin')).catch(() => toast('Ngjit fillimisht tekstin'));
+      break;
+    }
     case 'quick-space':
       state.ui.quickSpace = state.ui.quickSpace === 'personal' ? 'work' : 'personal';
       save(); render(); $('#quickInput')?.focus();
