@@ -1,10 +1,10 @@
 'use strict';
 /*
- * Planner — prototip PWA (v0.3)
- * Të dhënat ruhen vetëm në këtë pajisje (localStorage). Sinkronizimi vjen më vonë.
+ * Planner — prototip PWA (v0.4)
+ * Të dhënat ruhen në pajisje (localStorage); me Google login sinkronizohen nga sync.js (Firebase).
  *
  * Modeli:
- *  task: { id, title, space:'work'|'personal', date:'YYYY-MM-DD', scope:'day'|'week'|'month',
+ *  task: { id, title, space:'work'|'personal', date:'YYYY-MM-DD', scope:'day'|'week'|'month'|'range', due:'YYYY-MM-DD' (vetëm range),
  *          start:'HH:MM'|'', minutes:number, remind:min|null (para fillimit),
  *          rec:null|{type:'daily'|'weekly'|'days'|'monthly', days?:[0-6]}, notes,
  *          done, doneAt,                              // detyrat e thjeshta
@@ -82,6 +82,7 @@ let state = load();
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { alert('Ruajtja dështoi: ' + e.message); }
+  window.plannerSyncPush?.(); // sync.js: dërgon ndryshimet në cloud
 }
 const ui = { cal: null, sel: null, week: null }; // gjendja e pamjeve (nuk ruhet)
 let sheetCtx = null;
@@ -130,7 +131,7 @@ function taskInfo(t, T) {
     if (p) return { due: p, late: diffDays(T, p), done: false, doneToday: false };
     return { due: nextOcc(t.rec, t.date, addDays(T, 1)), late: 0, done: false, doneToday: t.lastDoneOn === T };
   }
-  const due = t.scope === 'week' ? endOfWeek(t.date) : t.scope === 'month' ? endOfMonth(t.date) : t.date;
+  const due = t.scope === 'week' ? endOfWeek(t.date) : t.scope === 'month' ? endOfMonth(t.date) : t.scope === 'range' ? (t.due || t.date) : t.date;
   return { due, late: t.done ? 0 : Math.max(0, diffDays(T, due)), done: !!t.done, doneToday: !!t.done && t.doneAt === T };
 }
 const apptsOn = d => state.appts.filter(inSpace).filter(a => occursOn(a.rec, a.date, d));
@@ -259,6 +260,15 @@ function taskItem(t, i, o = {}) {
   } else if (o.showDue && i.due) meta.push(`<span>${t.scope === 'day' || !t.scope ? '' : 'deri '}${fmtShort(i.due)}</span>`);
   if (!o.showDue && t.scope === 'week') meta.push('<span>këtë javë</span>');
   if (!o.showDue && t.scope === 'month') meta.push('<span>këtë muaj</span>');
+  if (!o.showDue && t.scope === 'range' && !(i.late > 0)) meta.push(`<span>${fmtShort(t.date)} – ${fmtShort(i.due)}</span>`);
+  if (t.scope && t.scope !== 'day' && !done && !(i.late > 0) && i.due) {
+    const T = today();
+    if (t.date > T) meta.push(`<span>fillon ${fmtShort(t.date)}</span>`);
+    else {
+      const left = diffDays(i.due, T);
+      meta.push(`<span class="${left <= 1 ? 'late-l' : ''}">${left === 0 ? 'afati sot' : left === 1 ? 'afati nesër' : `edhe ${left} ditë`}</span>`);
+    }
+  }
   if (o.timeCol && !t.start) o = { ...o, timeCol: false, hintEst: true };
   if (!o.timeCol && t.start) meta.push(`<span class="strong">🕘 ${t.start}${t.minutes ? '–' + addMinutes(t.start, t.minutes) : ''}</span>`);
   if (t.minutes) meta.push(`<span>⏱ ${fmtDur(t.minutes)}</span>`);
@@ -300,15 +310,16 @@ function renderToday() {
   const late = items.filter(e => e.late > 0 && !e.done).sort((a, b) => b.late - a.late);
   const plan = sortItems(items.filter(e => !e.done && !(e.late > 0)));
   const done = items.filter(e => e.done);
-  const week = [], month = [];
-  for (const t of state.tasks.filter(inSpace)) {
-    if (t.scope !== 'week' && t.scope !== 'month') continue;
+  const week = [], month = [], period = [];
+  for (const t of state.tasks.filter(inSpace).sort((a, b) => taskInfo(a, T).due.localeCompare(taskInfo(b, T).due))) {
+    if (!t.scope || t.scope === 'day') continue;
     const i = taskInfo(t, T);
     if (i.done || i.late > 0) continue;
     if (t.scope === 'week' && startOfWeek(t.date) <= T) week.push(taskItem(t, i, { showDue: true }));
     if (t.scope === 'month' && startOfMonth(t.date) <= T) month.push(taskItem(t, i, { showDue: true }));
+    if (t.scope === 'range' && t.date <= T) period.push(taskItem(t, i, { showDue: true }));
   }
-  const lateWeekMonth = state.tasks.filter(inSpace).filter(t => (t.scope === 'week' || t.scope === 'month'))
+  const lateWeekMonth = state.tasks.filter(inSpace).filter(t => t.scope && t.scope !== 'day')
     .map(t => [t, taskInfo(t, T)]).filter(([, i]) => !i.done && i.late > 0).map(([t, i]) => taskItem(t, i));
 
   const qs = state.ui.space !== 'all' ? state.ui.space : state.ui.quickSpace;
@@ -321,6 +332,7 @@ function renderToday() {
   const body = [
     section('Nga ditët e kaluara', [...late.map(entryRow), ...lateWeekMonth], 'late'),
     section('Plani i sotëm', planRows(plan, T), '', plan.length),
+    section('Në vazhdim · me afat', period),
     section('Këtë javë', week),
     section('Këtë muaj', month),
     section('Të kryera sot', done.map(entryRow)),
@@ -384,7 +396,8 @@ function renderWeek() {
       </summary>${list}
       <button class="add-day" data-act="add-on" data-date="${d}">+ Shto për ${DAYS_LONG[x.getDay()].toLowerCase()}</button></details>`;
   }
-  const wkTasks = state.tasks.filter(inSpace).filter(t => t.scope === 'week' && startOfWeek(t.date) === ui.week)
+  const wkTasks = state.tasks.filter(inSpace).filter(t => (t.scope === 'week' && startOfWeek(t.date) === ui.week) ||
+      (t.scope === 'range' && !t.done && t.date <= endOfWeek(ui.week) && (t.due || t.date) >= ui.week))
     .map(t => taskItem(t, taskInfo(t, T)));
   const lvT = level(tot, capT), pctT = capT ? Math.min(100, tot / capT * 100) : 0;
   return `<div class="cal-head"><h2>${fmtShort(days[0])} – ${fmtShort(days[6])}</h2>
@@ -559,18 +572,23 @@ function updateSlot(form) {
 
 function taskFields(t, sp, def) {
   const T = today();
-  let when = 'today', date = def.date || T;
+  let when = 'today', date = def.date || T, from = T, due = addDays(T, 7);
   if (t) {
     if (t.scope === 'week') when = 'week';
     else if (t.scope === 'month') when = 'month';
+    else if (t.scope === 'range') { when = 'range'; from = t.date; due = t.due || t.date; }
     else { when = t.date === T ? 'today' : t.date === addDays(T, 1) ? 'tomorrow' : 'date'; date = t.date; }
   } else if (def.date && def.date !== T) when = def.date === addDays(T, 1) ? 'tomorrow' : 'date';
   const p = t || def.prefill || {};
   return `<input class="title-in" name="title" placeholder="Çka duhet bërë?" value="${esc(p.title)}" required autocomplete="off">
     ${spaceSeg(sp)}
     <div class="row2">
-      <label class="fld"><span>Afati</span><select name="when">${opt([['today', 'Sot'], ['tomorrow', 'Nesër'], ['week', 'Këtë javë'], ['month', 'Këtë muaj'], ['date', 'Datë tjetër…']], when)}</select></label>
+      <label class="fld"><span>Afati</span><select name="when">${opt([['today', 'Sot'], ['tomorrow', 'Nesër'], ['week', 'Këtë javë'], ['month', 'Këtë muaj'], ['range', 'Periudhë: nga – deri (afat)'], ['date', 'Datë tjetër…']], when)}</select></label>
       <label class="fld ${when === 'date' ? '' : 'hidden'}" data-datewrap><span>Data</span><input type="date" name="date" value="${date}"></label>
+    </div>
+    <div class="row2 ${when === 'range' ? '' : 'hidden'}" data-rangewrap>
+      <label class="fld"><span>Nga</span><input type="date" name="from" value="${from}"></label>
+      <label class="fld"><span>Deri (afati)</span><input type="date" name="due" value="${due}"></label>
     </div>
     <div data-timewrap>${timeFields(p.start || '', p.minutes || '', 'Fillon në')}</div>
     ${recFields(t?.rec, date)}
@@ -618,7 +636,8 @@ function syncForm(form) {
   const when = form.elements.when?.value;
   const dw = form.querySelector('[data-datewrap]');
   if (dw) dw.classList.toggle('hidden', when !== 'date');
-  const isPeriod = when === 'week' || when === 'month';
+  form.querySelector('[data-rangewrap]')?.classList.toggle('hidden', when !== 'range');
+  const isPeriod = when === 'week' || when === 'month' || when === 'range';
   form.querySelector('[data-recwrap]').classList.toggle('hidden', isPeriod);
   form.querySelector('.days').classList.toggle('hidden', isPeriod || form.elements.rec.value !== 'days');
   form.querySelector('[data-remindwrap]')?.classList.toggle('hidden', isPeriod);
@@ -669,16 +688,21 @@ function submitSheet(form) {
 
   if (kind === 'task') {
     const when = f.get('when');
-    let date, scope = 'day';
+    let date, scope = 'day', rangeDue;
     if (when === 'today') date = T;
     else if (when === 'tomorrow') date = addDays(T, 1);
     else if (when === 'week') { scope = 'week'; date = item?.scope === 'week' ? item.date : T; }
     else if (when === 'month') { scope = 'month'; date = item?.scope === 'month' ? item.date : T; }
+    else if (when === 'range') {
+      scope = 'range'; date = f.get('from') || T;
+      rangeDue = f.get('due') || date;
+      if (rangeDue < date) { alert('Data "Deri" duhet të jetë pas datës "Nga".'); return; }
+    }
     else date = f.get('date') || T;
     const rec = scope === 'day' ? readRec(date) : null;
     const t = item || { id: uid(), created: Date.now(), done: false };
     if (item && JSON.stringify(item.rec) !== JSON.stringify(rec)) { t.doneThrough = null; t.undo = null; }
-    Object.assign(t, { title, space, date, scope, rec, start: scope === 'day' ? start : '', minutes, remind: start && scope === 'day' ? remind : null, notes });
+    Object.assign(t, { title, space, date, scope, due: rangeDue, rec, start: scope === 'day' ? start : '', minutes, remind: start && scope === 'day' ? remind : null, notes });
     if (rec) { t.done = false; t.doneAt = null; }
     if (!item) state.tasks.push(t);
     Object.keys(state.notified).filter(k => k.startsWith(`t|${t.id}|`)).forEach(k => delete state.notified[k]);
@@ -712,6 +736,7 @@ function openSettings() {
   const s = state.settings;
   $('#panel').innerHTML = `
     <div class="sheet-head"><h2>Cilësimet</h2><button class="icon" data-act="close" aria-label="Mbyll">✕</button></div>
+    <div class="set-block" id="syncBlock"></div>
     <div class="set-block"><h3>Orari i ditës</h3>
       <p class="note">Brenda këtij orari aplikacioni të tregon orët e lira dhe të gjen slot për detyrat.</p>
       <div class="row2">
@@ -741,7 +766,8 @@ function openSettings() {
       <button class="btn" data-act="import">Importo skedar</button>
       <button class="btn" data-act="export">Shkarko .json</button></div>
       <input type="file" id="importFile" accept="application/json,.json,text/plain" hidden></div>
-    <div class="set-block"><p class="note">Planner v0.3.1 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
+    <div class="set-block"><p class="note">Planner v0.4 · ${state.tasks.length} detyra · ${state.appts.length} takime</p></div>`;
+  window.plannerSyncRender?.();
   $('#sheet').classList.remove('hidden');
 }
 
